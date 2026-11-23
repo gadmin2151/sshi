@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=SSHI
+GenericName=SSH Connection Manager
+GenericName[ru]=Менеджер SSH-подключений
+Comment=Open SSH sessions through an Iroh relay
+Comment[ru]=Подключение по SSH через Iroh
+Exec=sshi-desktop
+Icon=sshi
+Terminal=false
+Categories=Network;RemoteAccess;
+Keywords=SSH;Iroh;Terminal;Relay;
+StartupNotify=true

@@ -1,0 +1,40 @@
+name: iroh-ssh
+
+x-iroh-ssh: &iroh-ssh
+  image: iroh-ssh:local
+  build: .
+  pull_policy: never
+  init: true
+  read_only: true
+  cap_drop: [ALL]
+  environment:
+    - IROH_RELAY_URL
+    - IROH_RELAY_ACCESS_TOKEN
+
+services:
+  receiver:
+    <<: *iroh-ssh
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - receiver-keys:/keys
+    command:
+      - serve
+      - --key
+      - /keys/server.key
+      - --target
+      - ${IROH_SSH_TARGET:-127.0.0.1:22}
+      - --allow-client
+      - ${IROH_SSH_CLIENT_ID:-}
+
+  initiator:
+    <<: *iroh-ssh
+    profiles: [initiator]
+    stdin_open: true
+    volumes:
+      - initiator-keys:/keys
+    command: ["--help"]
+
+volumes:
+  receiver-keys:
+  initiator-keys:

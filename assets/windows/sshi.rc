@@ -1,0 +1,49 @@
+#pragma code_page(65001)
+#include <windows.h>
+
+1 ICON "sshi.ico"
+1 RT_MANIFEST "sshi.manifest"
+
+1 VERSIONINFO
+FILEVERSION SSHI_VERSION_NUM
+PRODUCTVERSION SSHI_VERSION_NUM
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "FileDescription", "SSHI connections"
+            VALUE "FileVersion", SSHI_VERSION_STR
+            VALUE "ProductName", "SSHI"
+            VALUE "ProductVersion", SSHI_VERSION_STR
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END
+
+3 MENU
+BEGIN
+    POPUP "&Подключения"
+    BEGIN
+        MENUITEM "&Новое подключение", 102
+        MENUITEM SEPARATOR
+        MENUITEM "Сохранить резервную &копию…", 112
+        MENUITEM "&Восстановить из копии…", 113
+    END
+END
+
+2 DIALOGEX 0, 0, 344, 79
+STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Создано приглашение"
+FONT 9, "Segoe UI"
+BEGIN
+    LTEXT "Код действует 10 минут.", -1, 12, 11, 320, 12
+    EDITTEXT 2001, 12, 28, 320, 15, ES_READONLY | ES_AUTOHSCROLL
+    PUSHBUTTON "Копировать код", 2002, 168, 53, 101, 15
+    DEFPUSHBUTTON "Закрыть", IDOK, 276, 53, 56, 15
+END

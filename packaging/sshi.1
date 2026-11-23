@@ -1,0 +1,310 @@
+.TH SSHI 1 "2026-11-23" "SSHI 0.2.0" "User Commands"
+.SH NAME
+sshi, sshi-copy-id, sshi-copy-iid \- use OpenSSH over an iroh relay
+.SH SYNOPSIS
+.B sshi
+.RB [ \-i " file" ]
+.RB [ \-L " forward" ]
+.RB [ \-R " forward" ]
+.RB [ \-D " address" ]
+.RB [ \-N ]
+.RB [ \-T | \-t ]
+.RB [ \-v ]
+.I user@endpoint_id
+.RI [ command " [argument ...]]"
+.br
+.B sshi id
+.br
+.B sshi list
+.br
+.B sshi-copy-iid
+.RB [ \-p " port" ]
+.RB [ \-i " ssh_key" ]
+.RB [ \-\-client\-id " endpoint_id" ]
+.I user@host_or_endpoint_id
+.br
+.B sshi-copy-iid \-\-invite
+.I user@endpoint_id
+.br
+.B sshi-copy-id
+.RB [ \-i " public_key" ]
+.RB [ \-\-login\-key " private_key" ]
+.RB [ \-n ]
+.I user@endpoint_id
+.br
+.B sshi allow-client
+.I endpoint_id
+.br
+.B sshi invite
+.I endpoint_id
+.br
+.B sshi revoke-invite
+.I endpoint_id
+.br
+.B sshi serve
+.RB [ \-\-allow\-client " endpoint_id" ]
+.RB [ \-\-target " address:port" ]
+.SH DESCRIPTION
+.B sshi
+connects the local OpenSSH client to a receiving computer identified by its
+iroh Endpoint ID. The tunnel uses the configured iroh relay for all traffic
+between the two computers. OpenSSH performs login authentication and host key
+verification. The receiving computer runs an OpenSSH server on its loopback
+interface. The SSH account is the part of the destination before the at sign.
+Multiple SSH sessions to the same receiver use a common iroh tunnel with
+receivers that support it. The tunnel closes after the last session ends.
+.SH COMMANDS
+.TP
+.B id
+Print the local user's public iroh Endpoint ID. Create the persistent identity
+if necessary. This command works offline.
+.TP
+.B list
+List the local user's successfully authenticated SSH destinations, with the
+most recently used first. Repeated destinations appear once.
+.TP
+.B sshi-desktop
+Open the GTK connection manager on Linux. On macOS open the SSHI application.
+Both use the same saved profiles, relay settings and history as the CLI.
+.TP
+.B profile list [\-\-json]
+Show saved profiles.
+.TP
+.B profile save \-\-name NAME \-\-user USER \-\-endpoint ID [\-\-relay URL] [\-\-previous NAME]
+Create a named connection or rename/edit the specified previous entry.
+Omit the relay to use this account's default.
+.TP
+.B profile remove \-\-name NAME
+Remove the named connection.
+.TP
+.B profile run \-\-name NAME \-\- ARGS
+Run another sshi command with the selected profile's relay settings.
+.TP
+.B connect NAME [COMMAND ...]
+Start an SSH session or run a command using a saved profile.
+.TP
+.B backup FILE
+Write all named connections and connection history to a new portable JSON file.
+Credentials, SSH keys, server fingerprints and the private Iroh identity remain
+in their local stores. The output file must have a new name.
+.TP
+.B restore FILE
+Merge a supported JSON backup. Conflicting names abort the import
+before any connection is changed. Matching entries are preserved.
+.TP
+.B config show [\-\-json]
+Show effective settings and their sources. Token values stay private.
+.TP
+.B config set-relay URL
+Save this user's preferred relay address.
+.TP
+.B config reset-relay
+Remove the user's relay override and return to inherited settings.
+.TP
+.B config set-token [\-\-relay URL]
+Read the token from a hidden prompt or standard input. Store it in the
+current user's private configuration directory for this relay.
+.TP
+.B issue-invite \-\-name NAME \-\-client ID [\-\-service-user USER]
+Use an existing authorized connection to issue an invitation on its receiver.
+Specify the receiver service account when it differs from the SSH account.
+The remote Endpoint ID is checked before issuing a code.
+.TP
+.B copy-iid
+Authorize a public iroh Endpoint ID on a receiver.
+Use the receiver's regular SSH address or connect through iroh by specifying
+its Endpoint ID. An iroh connection requires an already authorized client
+identity for SSH access. Use an existing SSH account with permission to edit the receiver
+configuration. The receiver must have the
+.B sshi allow-client
+command installed. Also available as
+.BR sshi-copy-iid .
+The command adds the local Endpoint ID by default. Set
+.B \-\-client\-id
+to add the public Endpoint ID of another computer.
+The optional
+.B \-p
+selects the port for direct SSH and
+.B \-i
+selects an existing private SSH key for authentication.
+.B \-\-invite
+instead redeems an invitation through the receiver's iroh Endpoint ID.
+The invitation code is read from a hidden terminal prompt or standard input.
+.TP
+.B copy-id
+Install a public OpenSSH key in the remote account's
+.IR ~/.ssh/authorized_keys
+over iroh. Also available as
+.BR sshi-copy-id .
+Use
+.B \-i
+with a public key file or the base name of its
+.B .pub
+companion. Without
+.BR \-i ,
+the command looks for a standard public key in
+.IR ~/.ssh .
+Use
+.B \-\-login\-key
+to authenticate with an existing private key, or
+.B \-n
+to validate the public key and show the destination.
+The remote host uses
+.BR ssh-keygen (1)
+and
+.BR flock (1)
+when available. Receivers running SSHI 0.2.0 can also lock the key file directly on macOS.
+.TP
+.BI "allow-client " endpoint_id
+Add the given public Endpoint ID to the local
+.B allow_clients
+array. Applies to new connections immediately with an updated
+.B sshi serve
+process. Repeating the command leaves the entry in place.
+.TP
+.BI "invite " endpoint_id
+Issue a code for the client Endpoint ID and print it to standard output.
+Run this command as the user running
+.B sshi serve
+on the receiver. The code expires after ten minutes. Successful redemption
+adds access to the receiver's saved state. Subsequent SSH connections still
+use the server's SSH authentication.
+.TP
+.BI "revoke-invite " endpoint_id
+Revoke a pending invitation or the access granted by it. Run this command
+as the same receiver user. The change applies to new connections.
+.TP
+.B serve
+Register the same identity printed by
+.B sshi id
+and forward authorized incoming connections to the local OpenSSH server.
+.B \-\-allow\-client
+adds an incoming Endpoint ID to the configured allowlist and may be repeated.
+The TOML allowlist is read for each new connection.
+An empty allowlist denies incoming connections. The local user's outgoing
+connections also use the service while it is running.
+.B \-\-target
+overrides the local OpenSSH server address for this run.
+.SH OPTIONS
+.TP
+.BI \-i " file"
+Use the specified SSH private key. May be repeated.
+.TP
+.BI \-L " [bind_address:]port:host:hostport"
+Listen on the initiating computer and connect to the destination from the
+receiving computer. OpenSSH Unix socket syntax is also supported.
+.TP
+.BI \-R " [bind_address:]port:host:hostport"
+Listen on the receiving computer and connect to the destination from the
+initiating computer. OpenSSH Unix socket syntax is also supported.
+.TP
+.BI \-D " [bind_address:]port"
+Provide a local SOCKS proxy through the receiving computer.
+.TP
+.B \-N
+Run without a remote command or shell. Use with port forwarding and press
+Ctrl+C to stop.
+.TP
+.B \-T
+Disable remote pseudo-terminal allocation.
+.TP
+.B \-t
+Request a remote pseudo-terminal. Use twice to request it with redirected stdin.
+.TP
+.B \-v
+Enable OpenSSH diagnostics. Repeat for increased verbosity.
+.PP
+The forwarding options may be repeated. The SSH server's forwarding policy
+applies. When a requested listener cannot be set up, the SSH client exits with
+an error.
+.SH CONFIGURATION
+.TP
+.B /etc/sshi/config.toml
+System-wide TOML configuration. Set
+.B relay_url
+to the same relay URL on both computers. Set
+.B allow_clients
+to an array of authorized initiating Endpoint IDs on the receiving computer.
+.B ssh_target
+defaults to
+.BR 127.0.0.1:22 .
+.B relay_token_file
+can specify the absolute path to a relay token file readable by the user.
+The optional per-user token file defaults to
+.BR ~/.config/sshi/relay.token .
+.TP
+.B ~/.local/state/sshi/
+Per-user identity, connection library, history and invitation grants. The default directory is the same on Linux and macOS.
+.PP
+.B SSHI_CONFIG
+overrides the system-wide configuration path.
+.B IROH_RELAY_URL
+and
+.B IROH_RELAY_ACCESS_TOKEN
+override the configured relay URL and token.
+.B XDG_CONFIG_HOME
+and
+.B XDG_STATE_HOME
+override the defaults for per-user configuration and state respectively.
+.PP
+After updating the package or changing a receiving service's relay, token or
+SSH target, restart that service. Each incoming connection checks current
+allowlist and invitation permissions. Before using another relay or token for
+a shared client identity, close its existing sessions on the prior relay.
+.SH EXAMPLES
+Set PEER to the receiving computer's output from
+.BR "sshi id" .
+.PP
+Log in, or run a single command:
+.PP
+.nf
+sshi root@"$PEER"
+sshi root@"$PEER" uname \-a
+.fi
+.PP
+Authorize this computer on a receiver using its ordinary SSH address:
+.PP
+.nf
+sshi-copy-iid root@raspberrypi.local
+.fi
+.PP
+Add a new client's public ID over iroh from an already authorized computer:
+.PP
+.nf
+sshi-copy-iid \-\-client\-id "$NEW_CLIENT_ID" root@"$PEER"
+.fi
+.PP
+Issue an invitation on the receiver and redeem it on the new client:
+.PP
+.nf
+sshi invite "$NEW_CLIENT_ID"
+sshi-copy-iid \-\-invite root@"$PEER"
+.fi
+.PP
+Install a public SSH key for future logins:
+.PP
+.nf
+sshi-copy-id \-i ~/.ssh/id_ed25519.pub root@"$PEER"
+.fi
+.PP
+Forward local TCP port 8080 to port 80 on the receiving computer:
+.PP
+.nf
+sshi \-N \-L 127.0.0.1:8080:127.0.0.1:80 root@"$PEER"
+.fi
+.PP
+Forward port 9000 on the receiving computer to local port 3000:
+.PP
+.nf
+sshi \-N \-R 127.0.0.1:9000:127.0.0.1:3000 root@"$PEER"
+.fi
+.PP
+Create a local SOCKS listener on port 1080:
+.PP
+.nf
+sshi \-N \-D 127.0.0.1:1080 root@"$PEER"
+.fi
+.SH SEE ALSO
+.BR ssh (1),
+.BR ssh_config (5),
+.BR sshd_config (5)

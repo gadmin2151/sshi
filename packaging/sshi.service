@@ -1,0 +1,10 @@
+[Unit]
+Description=OpenSSH over an iroh relay
+
+[Service]
+ExecStart=/usr/bin/sshi serve
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=default.target

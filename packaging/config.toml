@@ -1,0 +1,12 @@
+# Both computers must use the same relay. Authenticated relays use HTTPS.
+relay_url = "https://iroh1.cmon.systems/"
+
+# Optional absolute path to a file readable by the user running sshi.
+# Without this setting, sshi looks for ~/.config/sshi/relay.token.
+# relay_token_file = "/etc/sshi/relay.token"
+
+# Local OpenSSH server on the receiving computer.
+ssh_target = "127.0.0.1:22"
+
+# Add the output of `sshi id` from each authorized initiating user.
+allow_clients = []

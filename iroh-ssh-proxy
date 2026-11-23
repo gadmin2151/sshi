@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+if [ "$#" -ne 1 ]; then
+    printf 'Usage: %s RECEIVER_ENDPOINT_ID\n' "$0" >&2
+    exit 2
+fi
+
+project_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+COMPOSE_PROGRESS=quiet COMPOSE_STATUS_STDOUT=false exec docker compose \
+    --file "$project_dir/compose.yaml" --env-file "$project_dir/.env" \
+    run --rm --no-deps -T --interactive initiator \
+    connect --key /keys/client.key --server "$1"

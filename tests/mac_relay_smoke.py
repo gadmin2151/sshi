@@ -174,6 +174,7 @@ def smoke(base):
         path = Path(command(control + ["path", "--", profile], tx).stdout.decode().strip())
         native = shlex.split(command(control + ["command", "--", profile], tx).stdout.decode())
         assert native[0] == "ssh" and native[-1] == destination and str(path) in native
+        assert path.parent == Path(f"/tmp/sshi-{os.geteuid()}") and path.name.startswith(receiver[:12] + "-")
         assert not path.exists() and command(native + ["true"], tx, check=False).returncode != 0
         baseline = rx_log.read_text().count(f"Shared iroh connection from {client}")
         auth = ssh_log.read_text().count(f"Accepted publickey for {user} ")
@@ -196,11 +197,11 @@ def smoke(base):
             if path.is_socket():
                 command(control + ["close", "--", profile], tx)
                 wait("control socket removal", lambda: not path.exists(), timeout=10)
+            # The fixture owns this unique endpoint and has no concurrent clients.
+            path.with_suffix(".lock").unlink(missing_ok=True)
         assert command(control + ["check", "--", profile], tx, check=False).returncode != 0
         assert command(native + ["true"], tx, check=False).returncode != 0
         wait("socket broker shutdown", lambda: not (base / "tx/sshi/proxy.sock").exists(), timeout=15)
-        # The fixture owns this unique endpoint and has no concurrent clients.
-        path.with_suffix(".lock").unlink(missing_ok=True)
         print("Managed socket started through Iroh, reused one SSH login, and closed cleanly", flush=True)
 
 

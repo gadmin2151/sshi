@@ -49,7 +49,7 @@ struct TestProfileClicks {
         precondition(AppLanguage.current(in: defaults) == .russian)
         defaults.set("en", forKey: AppLanguage.preferenceKey)
         let restored = AppLanguage.current(in: UserDefaults(suiteName: suite)!)
-        precondition(restored == .english && restored.whatsNew == "What’s new in 0.2.4")
+        precondition(restored == .english && restored.whatsNew == "What’s new in 0.2.5")
         precondition(ForwardKind.remote.title(restored) == "Access from there")
         precondition(AppLanguage.russian.commandError("Error: duplicate connection name 'old'").contains("уже существует"))
         precondition(restored.commandError("Error: invalid SSH username").contains("Check the SSH username"))
@@ -132,9 +132,73 @@ struct TestProfileClicks {
     }
 
     @MainActor
+    static func testSocketLifecycle(_ profile: Profile) async throws {
+        var calls: [String] = []
+        var launches = 0
+        var active = false
+        var directory: URL?
+        let manager = FileManager.default
+        let helper = Client.binary.deletingLastPathComponent().appendingPathComponent("sshi-socket-start")
+        let session = SocketSession(run: { selected, op in
+            precondition(selected == profile)
+            calls.append(op)
+            switch op {
+            case "path": return "/tmp/test.sock"
+            case "command": return "ssh -S /tmp/test.sock -o ProxyCommand=false -- example"
+            case "close": active = false; return ""
+            default:
+                if !active { throw ClientError(message: "No active SSH control socket") }
+                return "Master running"
+            }
+        }, launch: { selected, dir in
+            launches += 1
+            directory = dir
+            if launches == 1 {
+                // Run the packaged terminal reporter and a synthetic failing
+                // SSHI command. Its stdin/stdout are separate from diagnostics.
+                let testCLI = dir.appendingPathComponent("fixture-cli")
+                let script = """
+                #!/bin/sh
+                test "$1" = socket && test "$2" = start && test "$3" = -- && test -t 2 || exit 8
+                echo 'fixture stdout is private'
+                echo 'fixture public key was denied' >&2
+                exit 42
+                """
+                try script.write(to: testCLI, atomically: true, encoding: .utf8)
+                try manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: testCLI.path)
+                let process = Process()
+                process.executableURL = helper
+                process.arguments = [dir.path, testCLI.path, selected.name]
+                process.standardOutput = FileHandle.nullDevice
+                process.standardError = FileHandle.nullDevice
+                try process.run()
+                process.waitUntilExit()
+                precondition(process.terminationStatus == 42)
+            } else { active = true }
+        })
+        await session.open(profile, .english)
+        precondition(calls == ["path", "command", "check"] && launches == 0 && !session.active)
+        precondition(session.status == "The socket is stopped.")
+        session.start(profile, .english)
+        await session.monitor?.value
+        precondition(session.showDetails && session.lastError == "fixture public key was denied")
+        precondition(!session.pending && session.status.contains("42") && !manager.fileExists(atPath: directory!.path))
+        session.start(profile, .english)
+        await session.monitor?.value
+        precondition(session.active && session.status.contains("Copy command") && launches == 2)
+        session.start(profile, .english)
+        precondition(launches == 2)
+        await session.check(profile, .english, closing: true)
+        precondition(!session.active && !session.pending && session.status == "The socket is stopped.")
+        session.dispose()
+        print("Socket sheet opens offline, displays terminal failures, detects readiness, closes and cleans up")
+    }
+
+    @MainActor
     static func testSocketAndUpdates() async throws {
         let profiles = try JSONDecoder().decode([Profile].self, from: Client.run(["profile", "list", "--json"]))
         let selected = profiles.first { $0.name == "Second" }!
+        try await testSocketLifecycle(selected)
         let path = String(decoding: try Client.run(selected.socket("path")), as: UTF8.self).trimmingCharacters(in: .newlines)
         let command = String(decoding: try Client.run(selected.socket("command")), as: UTF8.self)
         precondition(path.hasPrefix("/tmp/") && path.hasSuffix(".sock"))

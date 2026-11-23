@@ -17,8 +17,9 @@ trap 'rm -rf "$work"' EXIT
 app="$work/root/Applications/SSHI.app"
 mkdir -p "$app/Contents/"{MacOS,Resources/bin} "$work/root/usr/local/bin" "$work/root/usr/local/share/man/man1" "$work/scripts" dist
 install -m 755 "$cli" "$app/Contents/Resources/bin/sshi"
+clang -Wall -Wextra -Werror -O2 desktop/macos/socket-start.c -o "$app/Contents/Resources/bin/sshi-socket-start"
 swiftc -swift-version 5 -parse-as-library -O -target arm64-apple-macos12.0 \
-    desktop/macos/{SSHI,Localization,Forwarding,Invitations}.swift -o "$app/Contents/MacOS/SSHI"
+    desktop/macos/{SSHI,Localization,Forwarding,Invitations,Sockets}.swift -o "$app/Contents/MacOS/SSHI"
 install -m 644 desktop/macos/Info.plist "$app/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" "$app/Contents/Info.plist"
 cp packaging/config.toml LICENSE "$app/Contents/Resources/"
@@ -31,6 +32,7 @@ for side in 16 32 128 256 512; do
 done
 iconutil -c icns "$icon" -o "$app/Contents/Resources/sshi.icns"
 codesign --force --sign - "$app/Contents/Resources/bin/sshi"
+codesign --force --sign - "$app/Contents/Resources/bin/sshi-socket-start"
 codesign --force --sign - "$app"
 codesign --verify --deep --strict "$app"
 for tool in sshi sshi-copy-iid sshi-copy-id; do

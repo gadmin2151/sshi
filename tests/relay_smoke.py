@@ -7,14 +7,13 @@ import os
 import pathlib
 import re
 import shlex
-import signal
 import socket
 import subprocess
 import tempfile
 import threading
 import time
 
-from login_pty import first_login
+from login_pty import first_login, start_in_terminal
 
 if not pathlib.Path("/.dockerenv").exists() or os.geteuid() != 0:
     raise SystemExit("Run in a disposable Debian container as root")
@@ -84,24 +83,6 @@ def ready(process, logfile, marker):
         raise AssertionError(f"Process exited early: {text(logfile.read_bytes())}")
     return marker in logfile.read_bytes()
 
-def start_socket_from_terminal(profile, env):
-    child, terminal = os.forkpty()
-    if child == 0:
-        try:
-            os.execvpe("sshi", ["sshi", "socket", "start", "--", profile], env)
-        finally:
-            os._exit(127)
-    try:
-        wait_for(lambda: os.waitid(os.P_PID, child, os.WEXITED | os.WNOHANG | os.WNOWAIT),
-                 "socket start in its own controlling terminal", 35)
-    except BaseException:
-        os.kill(child, signal.SIGKILL)
-        raise
-    finally:
-        os.close(terminal)
-        _, status = os.waitpid(child, 0)
-    assert os.waitstatus_to_exitcode(status) == 0, "socket start failed in its terminal"
-
 def check_profile_socket(profile, destination, env, sshd_log):
     def action(name):
         return run(["sshi", "socket", name, profile], env=env)
@@ -123,7 +104,7 @@ def check_profile_socket(profile, destination, env, sshd_log):
         check(action("close"), "close profile socket")
         wait_for(lambda: not path.exists(), "profile socket removal")
         # Desktop clients close the authentication terminal as soon as start exits.
-        start_socket_from_terminal(profile, env)
+        start_in_terminal(["sshi", "socket", "start", "--", profile], env)
         check(action("check"), "master survived the authentication terminal closing")
         assert check(run([*command, "printf after-terminal-close"], env=env),
                      "use socket after the terminal closed") == b"after-terminal-close"

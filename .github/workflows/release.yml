@@ -149,6 +149,13 @@ jobs:
           sshi id
           /Applications/SSHI.app/Contents/MacOS/SSHI --smoke-test
           bash desktop/macos/test-clicks.sh 2>&1 | tee "$RUNNER_TEMP/sshi-mac-gui.log"
+      - name: Verify the installed Mac package through a local relay after closing its terminal
+        shell: bash
+        env:
+          CARGO_PROFILE_DEV_DEBUG: '0'
+        run: |
+          cargo +1.96.0 install --locked --debug --version 1.5.0 --features server iroh-relay
+          python3 tests/mac_relay_smoke.py 2>&1 | tee "$RUNNER_TEMP/mac-relay-smoke.log"
       - if: failure()
         run: |
           if test -f "$RUNNER_TEMP/sshi-mac-build.log"; then
@@ -156,6 +163,9 @@ jobs:
           fi
           if test -f "$RUNNER_TEMP/sshi-mac-gui.log"; then
             head -40 "$RUNNER_TEMP/sshi-mac-gui.log" | while IFS= read -r line; do echo "::error::$line"; done
+          fi
+          if test -f "$RUNNER_TEMP/mac-relay-smoke.log"; then
+            tail -20 "$RUNNER_TEMP/mac-relay-smoke.log" | while IFS= read -r line; do echo "::error::$line"; done
           fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

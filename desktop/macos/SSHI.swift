@@ -73,7 +73,7 @@ enum Client {
         try execute(binary, arguments, input: input)
     }
 
-    static func terminal(_ arguments: [String], hold: Bool) throws {
+    static func terminal(_ arguments: [String], hold: Bool, executable: URL = Client.binary) throws {
         // Terminal user's login shell may differ. AppleScript quotes every argument,
         // then /bin/sh interprets only the fixed wrapper and passes data as argv.
         let script = """
@@ -102,7 +102,7 @@ enum Client {
         """
         _ = try execute(URL(fileURLWithPath: "/usr/bin/osascript"), [
             "-e", script, "/bin/sh", "-c", wrapper, "sshi-terminal",
-            hold ? "yes" : "no", tr("Нажмите Enter, чтобы завершить.", "Press Enter to finish."), binary.path
+            hold ? "yes" : "no", tr("Нажмите Enter, чтобы завершить.", "Press Enter to finish."), executable.path
         ] + arguments)
     }
 }
@@ -129,6 +129,7 @@ final class Workspace: ObservableObject {
     @Published var sheet: SheetItem?
     @Published var feedback: String?
     @Published var busy = false
+    var socketErrors: [String: String] = [:]
     @Published var update: ReleaseUpdate?
     @Published var checkingUpdate = false
     @Published var updateError: String?
@@ -613,98 +614,6 @@ struct WorkspaceView: View {
         .alert("SSHI", isPresented: Binding(get: { workspace.feedback != nil }, set: { if !$0 { workspace.feedback = nil } })) {
             Button("OK") { workspace.feedback = nil }
         } message: { Text(workspace.feedback ?? "") }
-    }
-}
-
-private struct SocketSheet: View {
-    @ObservedObject var workspace: Workspace
-    let profile: Profile
-    let language: AppLanguage
-    @State private var path = ""
-    @State private var command = ""
-    @State private var status = ""
-    @State private var busy = false
-    @State private var confirmStop = false
-
-    private func output(_ operation: String) async throws -> String {
-        let args = profile.socket(operation)
-        return try await Task.detached(priority: .userInitiated) {
-            String(decoding: try Client.run(args), as: UTF8.self).trimmingCharacters(in: .newlines)
-        }.value
-    }
-
-    private func field(_ title: String, _ value: String, _ copy: String) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title).font(.headline)
-            Text(value).font(.system(.body, design: .monospaced))
-                .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-            Button(copy) {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(value, forType: .string)
-                status = language("Скопировано.", "Copied.")
-            }.disabled(value.isEmpty)
-        }
-    }
-
-    private func control(_ operation: String) {
-        busy = true
-        Task {
-            defer { busy = false }
-            do {
-                _ = try await output(operation)
-                status = operation == "check"
-                    ? language("Сокет готов. Можно использовать команду SSH.", "The socket is ready. You can use the SSH command.")
-                    : language("Сокет остановлен.", "The socket is stopped.")
-            } catch {
-                status = error.localizedDescription.localizedCaseInsensitiveContains("no active ssh control socket")
-                    ? language("Сокет не запущен.", "The socket is stopped.") : error.localizedDescription
-            }
-        }
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 13) {
-            Text(language("SSH-сокет", "SSH control socket")).font(.title2.bold())
-            Text(profile.name).font(.headline)
-            Text(language("Запустите сокет и войдите через Терминал. Затем передайте команду Codex или выполните её в другом окне.",
-                          "Start the socket and sign in through Terminal. Then give the command to Codex or run it in another window."))
-                .fixedSize(horizontal: false, vertical: true)
-            Divider()
-            field(language("Путь на этом Mac", "Path on this Mac"), path, language("Скопировать путь", "Copy path"))
-            field(language("Команда SSH", "SSH command"), command, language("Скопировать команду", "Copy command"))
-            HStack {
-                Button(language("Запустить", "Start socket")) {
-                    status = language("Завершите вход в Терминале, затем нажмите «Проверить».",
-                                      "Complete sign-in in Terminal, then select Check status.")
-                    workspace.launch(profile.socket("start"), hold: false) { message in status = message }
-                }.buttonStyle(.borderedProminent).disabled(workspace.busy)
-                Button(language("Проверить", "Check status")) { control("check") }
-                Button(language("Остановить…", "Stop socket…")) { confirmStop = true }
-            }.disabled(busy || command.isEmpty)
-            Text(language("По умолчанию сокет закрывается после 11 ч 40 мин без активных сеансов.",
-                          "By default, the socket closes after 11 hours and 40 minutes without an active session."))
-                .font(.callout).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
-            if !status.isEmpty {
-                Text(status).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-            }
-            HStack {
-                Spacer()
-                Button(language("Готово", "Done")) { workspace.sheet = nil }.keyboardShortcut(.cancelAction)
-            }
-        }
-        .padding(24).frame(width: 510)
-        .task {
-            do {
-                path = try await output("path")
-                command = try await output("command")
-            } catch { status = error.localizedDescription }
-        }
-        .alert(language("Остановить SSH-сокет?", "Stop this SSH control socket?"), isPresented: $confirmStop) {
-            Button(language("Отмена", "Cancel"), role: .cancel) {}
-            Button(language("Остановить", "Stop"), role: .destructive) { control("close") }
-        } message: {
-            Text(language("Сеансы, использующие этот сокет, будут закрыты.", "Sessions using this socket will disconnect."))
-        }
     }
 }
 

@@ -1,4 +1,4 @@
-"""Drive an interactive first SSHI login in an isolated test terminal."""
+"""Drive SSHI in isolated controlling terminals on Linux and macOS."""
 import errno
 import os
 import pty
@@ -7,6 +7,41 @@ import select
 import signal
 import termios
 import time
+
+
+def start_in_terminal(args, env):
+    """Close a temporary terminal when the OpenSSH master launcher exits."""
+    child, terminal = pty.fork()
+    if child == 0:
+        try:
+            os.execvpe(args[0], args, env)
+        finally:
+            os._exit(127)
+    reaped = False
+    output = bytearray()
+    deadline = time.monotonic() + 35
+    try:
+        while time.monotonic() < deadline:
+            if select.select([terminal], [], [], 0.1)[0]:
+                try:
+                    output.extend(os.read(terminal, 4096))
+                except OSError as error:
+                    if error.errno != errno.EIO:
+                        raise
+            done, status = os.waitpid(child, os.WNOHANG)
+            if done:
+                reaped = True
+                assert os.waitstatus_to_exitcode(status) == 0, output.decode(errors="replace")
+                return
+        raise AssertionError("socket start timed out in its terminal")
+    finally:
+        os.close(terminal)
+        if not reaped:
+            try:
+                os.kill(child, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            os.waitpid(child, 0)
 
 
 def first_login(args, env, grant, client_id, prompt=b"Invitation code or link (Enter to cancel): ", shell_prompt=True):

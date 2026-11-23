@@ -15,7 +15,7 @@ import sys
 import tempfile
 import time
 
-from login_pty import first_login
+from login_pty import first_login, start_in_terminal
 
 
 def command(args, env, data=b"", check=True):
@@ -179,13 +179,8 @@ def smoke(base):
         baseline = rx_log.read_text().count(f"Shared iroh connection from {client}")
         auth = ssh_log.read_text().count(f"Accepted publickey for {user} ")
         try:
-            # File-backed output lets a background master finish detaching even if
-            # an OpenSSH version leaves diagnostic descriptors open in its proxy.
-            start_log = base / "socket-start.log"
-            with start_log.open("wb") as output:
-                start = subprocess.run(control + ["start", "--persist", "1m", "--", profile], env=tx,
-                                       stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT, timeout=30)
-            assert start.returncode == 0, start_log.read_text(errors="replace")
+            # Terminal.app closes its authentication window when the launcher exits.
+            start_in_terminal(control + ["start", "--persist", "1m", "--", profile], tx)
             assert path.is_socket() and path.parent.stat().st_mode & 0o077 == 0
             command(control + ["check", "--", profile], tx)
             first = command(native + ["printf via-local-socket; exit 37"], tx, check=False)
@@ -202,7 +197,7 @@ def smoke(base):
         assert command(control + ["check", "--", profile], tx, check=False).returncode != 0
         assert command(native + ["true"], tx, check=False).returncode != 0
         wait("socket broker shutdown", lambda: not (base / "tx/sshi/proxy.sock").exists(), timeout=15)
-        print("Managed socket started through Iroh, reused one SSH login, and closed cleanly", flush=True)
+        print("Managed socket survived terminal closure, reused one SSH login through Iroh, and closed cleanly", flush=True)
 
 
 if __name__ == "__main__":

@@ -16,6 +16,25 @@ env:
   CARGO_PROFILE_TEST_DEBUG: '0'
 
 jobs:
+  supersede:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && startsWith(github.event.head_commit.message, 'Release SSHI ')
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: write
+    steps:
+      - name: Stop superseded builds of this release workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          resource="repos/$GITHUB_REPOSITORY/actions"
+          gh api "$resource/workflows/release.yml/runs?branch=main&event=push&per_page=20" |
+            jq --argjson current "$GITHUB_RUN_NUMBER" -r '.workflow_runs[] | select(.run_number < $current and (.status == "queued" or .status == "in_progress")) | .id' |
+            while read -r run; do
+              gh api -X POST "$resource/runs/$run/cancel" || {
+                test "$(gh api "$resource/runs/$run" --jq .status)" = completed
+              }
+            done
+
   packages:
     runs-on: ubuntu-24.04
     strategy:
@@ -129,6 +148,9 @@ jobs:
         run: |
           version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
           tag="v$version"
+          if [ "$GITHUB_REF_TYPE" = branch ]; then
+            test "$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)" = "$GITHUB_SHA"
+          fi
           if [ "$GITHUB_REF_TYPE" = tag ]; then test "$GITHUB_REF_NAME" = "$tag"; fi
           ( cd dist && sha256sum * > SHA256SUMS )
           sudo apt-get update && sudo apt-get install -y rpm2cpio

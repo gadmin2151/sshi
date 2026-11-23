@@ -6,7 +6,7 @@ License:        MIT
 URL:            https://github.com/gadmin2151/sshi
 Source0:        payload.tar
 Requires:       openssh-clients, ca-certificates
-Recommends:     python3-gobject, gtk3
+Recommends:     python3-gobject, gtk3, gobject-introspection
 Suggests:       openssh-server
 %global debug_package %{nil}
 # The incoming executable is already stripped for the package's target CPU.

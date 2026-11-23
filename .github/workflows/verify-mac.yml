@@ -3,10 +3,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Published SSHI version
+        description: Published SSHI version (defaults to the version in Cargo.toml)
         type: string
-        required: true
-        default: '0.2.0'
+        required: false
   push:
     branches: [main]
     paths:

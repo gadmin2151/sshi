@@ -6,6 +6,7 @@ import json
 import os
 import pathlib
 import re
+import shlex
 import socket
 import subprocess
 import tempfile
@@ -81,6 +82,33 @@ def ready(process, logfile, marker):
     if process.poll() is not None:
         raise AssertionError(f"Process exited early: {text(logfile.read_bytes())}")
     return marker in logfile.read_bytes()
+
+def check_profile_socket(profile, destination, env, sshd_log):
+    def action(name):
+        return run(["sshi", "socket", name, profile], env=env)
+    path = pathlib.Path(check(action("path"), "print profile socket path").decode().strip())
+    command = shlex.split(check(action("command"), "print native SSH command").decode())
+    assert command[0] == "ssh" and command[-1] == destination
+    assert not path.exists() and action("check").returncode != 0
+    assert run([*command, "exit 0"], env=env).returncode != 0
+    auth = sshd_log.read_bytes().count(b"Accepted publickey for root ")
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as workers:
+            starts = list(workers.map(action, ["start", "start"]))
+        assert all(check(start, "start shared profile socket").decode().strip() == str(path) for start in starts)
+        assert path.is_socket() and path.parent.stat().st_mode & 0o077 == 0
+        check(action("check"), "check active profile socket")
+        assert check(run([*command, "printf profile-socket"], env=env), "use native SSH command") == b"profile-socket"
+        assert check(run(["sshi", "-S", str(path), profile, "printf reused"], env=env), "reuse master by profile") == b"reused"
+        assert sshd_log.read_bytes().count(b"Accepted publickey for root ") == auth + 1
+        check(action("close"), "close profile socket")
+        wait_for(lambda: not path.exists(), "profile socket removal")
+        assert action("check").returncode != 0
+        assert run([*command, "exit 0"], env=env).returncode != 0
+    finally:
+        if path.exists():
+            action("close")
+    print("Profile socket inspection, concurrent start, one authenticated connection, native SSH and explicit close: pass", flush=True)
 
 man_path = check(run(["man", "-w", "sshi"]), "find man sshi")
 assert b"/sshi.1.gz" in man_path
@@ -198,6 +226,33 @@ with tempfile.TemporaryDirectory(prefix="sshi.") as tmp:
             assert check(run(["sshi", "list"], env=initiator), "recorded destination") == recorded
             print("SSH root login, remote exit status, and history of authenticated connections: pass", flush=True)
 
+            control_path = str(base / "connection.sock")
+            control = ["sshi", "-S", control_path]
+            native_control = ["ssh", "-S", control_path]
+            initial_auth = sshd_log.read_bytes().count(b"Accepted publickey for root ")
+            # The master authenticates once. Its clients have only the rejected key above.
+            try:
+                master = run([*sshi, "-M", "-N", "-f", "-S", control_path, "-o",
+                              "ControlPersist=700m", destination], env=initiator)
+                check(master, "start a background OpenSSH control master")
+                assert pathlib.Path(control_path).is_socket()
+                for tool in (control, native_control):
+                    status = run([*tool, "-O", "check", destination], env=initiator)
+                    check(status, "check OpenSSH control master")
+                    assert b"Master running (pid=" in status.stderr, status.stderr
+                for tool in (control, native_control):
+                    session = run([*tool, "-i", str(base / "wrong"), destination,
+                                   "printf via-master; exit 37"], env=initiator)
+                    check(session, "reuse master", session.returncode == 37 and session.stdout == b"via-master")
+                assert sshd_log.read_bytes().count(b"Accepted publickey for root ") == initial_auth + 1
+                check(run([*control, "-O", "exit", destination], env=initiator), "stop OpenSSH master")
+                wait_for(lambda: not os.path.exists(control_path), "control socket removal")
+                assert run([*control, "-O", "check", destination], env=initiator).returncode != 0
+            finally:
+                if os.path.exists(control_path):
+                    run([*native_control, "-O", "exit", destination], env=initiator)
+            print("A persistent OpenSSH control socket shared one login across sshi and ssh and closed cleanly: pass", flush=True)
+
             with daemon(["sshi", "serve"], env=initiator, logfile=client_log) as tx:
                 wait_for(lambda: ready(tx, client_log, f"Ready: {initiator_id}".encode()), "initiator relay")
                 result = run([*sshi, "-tt", destination, "test -t 0 && printf tty-ok"], env=initiator)
@@ -228,14 +283,16 @@ with tempfile.TemporaryDirectory(prefix="sshi.") as tmp:
                     # Use the host's OpenSSH settings for the test profile, as in the app.
                     with pathlib.Path("/etc/ssh/ssh_config.d/10-sshi-smoke.conf").open("a") as config:
                         config.write(f"Host {receiver_id}\n  IdentityFile {base / 'login'}\n")
-                    check(run(["sshi", "profile", "save", "--name", "Workshop", "--user", "root",
+                    profile_name = "root@Workshop"
+                    check(run(["sshi", "profile", "save", "--name", profile_name, "--user", "root",
                                "--endpoint", receiver_id], env=initiator), "create desktop profile")
+                    check_profile_socket(profile_name, destination, initiator, sshd_log)
                     for kind in ("local", "remote", "dynamic"):
                         with socket.socket() as sock:
                             sock.bind(("127.0.0.1", 0))
                             listen = sock.getsockname()[1]
                         target = local_http if kind == "remote" else remote_http
-                        action = ["sshi", "forward", "--profile", "Workshop", "--kind", kind,
+                        action = ["sshi", "forward", "--profile", profile_name, "--kind", kind,
                                   "--bind-host", "127.0.0.1", "--bind-port", str(listen)]
                         request = ["curl", "-fsS", "--max-time", "2"]
                         if kind == "dynamic":

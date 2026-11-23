@@ -27,7 +27,7 @@ if not os.path.isfile(SSHI):
     SSHI = shutil.which("sshi") or "sshi"
 
 LANGUAGE_FILE = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "sshi/desktop-language"
-RELEASE_URL = "https://github.com/gadmin2151/sshi/releases/tag/v0.2.2"
+RELEASE_URL = "https://github.com/gadmin2151/sshi/releases/tag/v0.2.3"
 
 
 def read_language():
@@ -138,6 +138,17 @@ def cli(*args, stdin=None, timeout=8):
     return result.stdout.strip()
 
 
+def background(work, completed):
+    def run():
+        try:
+            value = work()
+        except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+            GLib.idle_add(completed, None, str(error))
+        else:
+            GLib.idle_add(completed, value, None)
+    threading.Thread(target=run, daemon=True).start()
+
+
 def open_terminal(args, hold):
     wrapper = (
         'hold=$1; prompt=$2; shift 2; "$@"; result=$?; '
@@ -183,6 +194,87 @@ def socket_address(host, port):
                                  for part in dns.split(".")):
         raise ValueError(tr("Укажите IP-адрес или имя хоста.", "Enter an IP address or hostname."))
     return f"{host}:{port}"
+
+
+class ControlSocketDialog(Gtk.Dialog):
+    def __init__(self, parent, name, path, command):
+        super().__init__(title=tr("SSH-сокет", "SSH control socket"), transient_for=parent, modal=True)
+        self.name = name
+        self.set_default_size(535, -1)
+        self.add_button(tr("Готово", "Done"), Gtk.ResponseType.CLOSE)
+        body = box(True, 12)
+        body.set_border_width(18)
+        self.get_content_area().add(body)
+        body.add(label(name, "sshi-section", wrap=True))
+        body.add(label(tr("Запустите сокет и войдите через терминал. Затем передайте команду Codex или выполните её в другом окне.",
+                          "Start the socket and sign in through the terminal. Then give the command to Codex or run it in another window."), wrap=True))
+        self.status = label("", wrap=True)
+        for title, caption, value in (
+            (tr("Путь на этом компьютере", "Path on this computer"), tr("Скопировать путь", "Copy path"), path),
+            (tr("Команда SSH", "SSH command"), tr("Скопировать команду", "Copy command"), command),
+        ):
+            body.add(label(title, "sshi-section"))
+            field = label(value, "sshi-mono", wrap=True)
+            field.set_selectable(True)
+            field.get_accessible().set_name(title)
+            body.add(field)
+            button = action(caption, lambda v=value: self.copy(v), "edit-copy-symbolic")
+            button.set_halign(Gtk.Align.START)
+            body.add(button)
+        row = box()
+        self.start_button = styled(action(tr("Запустить", "Start socket"), self.start), "suggested-action")
+        row.add(self.start_button)
+        row.add(action(tr("Проверить", "Check status"), lambda: self.control("check")))
+        row.add(action(tr("Остановить…", "Stop socket…"), self.confirm_stop))
+        body.add(row)
+        body.add(label(tr("По умолчанию сокет закрывается после 11 ч 40 мин без активных сеансов.",
+                          "By default, the socket closes after 11 hours and 40 minutes without an active session."), wrap=True))
+        self.controls = row
+        body.add(self.status)
+        self.show_all()
+
+    def copy(self, value):
+        clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+        clipboard.set_text(value, -1)
+        clipboard.store()
+        self.status.set_text(tr("Скопировано.", "Copied."))
+
+    def start(self):
+        try:
+            open_terminal(["socket", "start", "--", self.name], False)
+            self.status.set_text(tr("Завершите вход в терминале, затем нажмите «Проверить».",
+                                    "Complete sign-in in the terminal, then select Check status."))
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            self.status.set_text(str(error))
+
+    def confirm_stop(self):
+        prompt = Gtk.MessageDialog(transient_for=self, modal=True, buttons=Gtk.ButtonsType.NONE,
+                                   message_type=Gtk.MessageType.QUESTION,
+                                   text=tr("Остановить SSH-сокет?", "Stop this SSH control socket?"))
+        prompt.format_secondary_text(tr("Сеансы, использующие этот сокет, будут закрыты.",
+                                        "Sessions using this socket will disconnect."))
+        prompt.add_buttons(tr("Отмена", "Cancel"), Gtk.ResponseType.CANCEL,
+                           tr("Остановить", "Stop"), Gtk.ResponseType.OK)
+        accepted = prompt.run() == Gtk.ResponseType.OK
+        prompt.destroy()
+        if accepted:
+            self.control("close")
+
+    def control(self, operation):
+        self.controls.set_sensitive(False)
+        def finished(_, error):
+            if self.get_visible():
+                self.controls.set_sensitive(True)
+                if error and "no active ssh control socket" in error.lower():
+                    message = tr("Сокет не запущен.", "The socket is stopped.")
+                elif error:
+                    message = error
+                elif operation == "check":
+                    message = tr("Сокет готов. Можно использовать команду SSH.", "The socket is ready. You can use the SSH command.")
+                else:
+                    message = tr("Сокет остановлен.", "The socket is stopped.")
+                self.status.set_text(message)
+        background(lambda: cli("socket", operation, "--", self.name), finished)
 
 
 class ForwardDialog(Gtk.Dialog):
@@ -658,6 +750,13 @@ class Window(Gtk.Window):
         header.set_custom_title(brand)
         self.add_button = action("", lambda: self.edit(), "list-add-symbolic")
         header.pack_start(self.add_button)
+        self.update_info = None
+        self.update_error = None
+        self.checking_update = False
+        self.update_settings = None
+        self.update_badge = action("", lambda: self.offer_update(self), "software-update-available-symbolic")
+        self.update_badge.set_no_show_all(True)
+        header.pack_end(self.update_badge)
         self.menu_button = Gtk.MenuButton()
         self.menu_button.set_image(Gtk.Image.new_from_icon_name("open-menu-symbolic", Gtk.IconSize.BUTTON))
         header.pack_end(self.menu_button)
@@ -710,6 +809,7 @@ class Window(Gtk.Window):
             self.safe(self.reload)
 
     def refresh_language(self):
+        self.refresh_update_ui()
         self.add_button.set_label(tr("Подключение", "Connection"))
         self.sidebar_title.set_text(tr("Подключения", "Connections"))
         self.search.set_placeholder_text(tr("Поиск подключений", "Search connections"))
@@ -879,6 +979,7 @@ class Window(Gtk.Window):
                 (tr("Создать приглашение…", "Create invite…"), "mail-send-symbolic", lambda: self.invite(p)),
                 (tr("Установить SSH-ключ…", "Install SSH key…"), "changes-prevent-symbolic", lambda: self.ssh_key(p)),
                 (tr("Пробросить порт…", "Forward a port…"), "network-wired-symbolic", lambda: self.forward(p)),
+                (tr("SSH-сокет…", "SSH control socket…"), "utilities-terminal-symbolic", lambda: self.safe(lambda: self.control_socket(p))),
                 (tr("Токен этого relay…", "Token for this relay…"), "dialog-password-symbolic", lambda: self.profile_token(p)),
             ]
             for index, (caption, icon_name, callback) in enumerate(items):
@@ -989,6 +1090,71 @@ class Window(Gtk.Window):
         clipboard.store()
         self.message(tr("Мой Endpoint ID скопирован.\n\n", "Your Endpoint ID was copied.\n\n") + endpoint)
 
+    def check_updates(self):
+        if self.checking_update:
+            return
+        self.checking_update = True
+        self.update_error = None
+        self.refresh_update_ui()
+        def finished(info, error):
+            self.checking_update = False
+            self.update_error = error
+            if info:
+                self.update_info = info
+            self.refresh_update_ui()
+        background(lambda: json.loads(cli("update", "--json", timeout=30)), finished)
+
+    def refresh_update_ui(self):
+        info = self.update_info
+        available = bool(info and info["available"])
+        if available:
+            self.update_badge.set_label(tr("Обновить до {}", "Update to {}").format(info["latest"]))
+        self.update_badge.set_visible(available)
+        if self.update_settings is None:
+            return
+        check, download, summary = self.update_settings
+        check.set_sensitive(not self.checking_update)
+        download.set_visible(available)
+        if self.checking_update:
+            message = tr("Проверяем GitHub Releases…", "Checking GitHub Releases…")
+        elif self.update_error:
+            message = tr("Не удалось проверить обновления.", "Could not check for updates.") + "\n" + self.update_error
+        elif available:
+            message = tr("Установлена версия {}. Доступна {}.", "Version {} is installed. Version {} is available.").format(info["current"], info["latest"])
+        elif info:
+            message = tr("Установлена актуальная версия {}.", "Version {} is up to date.").format(info["current"])
+        else:
+            message = ""
+        summary.set_text(message)
+        summary.set_visible(bool(message))
+
+    def offer_update(self, parent):
+        info = self.update_info
+        if not info or not info["available"]:
+            return
+        asset = info.get("download_url")
+        message = tr("Скачать SSHI {}?", "Download SSHI {}?").format(info["latest"])
+        dialog = Gtk.MessageDialog(transient_for=parent, modal=True, buttons=Gtk.ButtonsType.NONE,
+                                   message_type=Gtk.MessageType.INFO, text=message)
+        hint = tr("Откройте скачанный пакет в установщике программ, установите обновление и перезапустите SSHI.",
+                  "Open the downloaded package in your software installer, install the update, and restart SSHI.")
+        if asset and asset.endswith(".pkg.tar.zst"):
+            filename = asset.rsplit("/", 1)[-1]
+            hint = tr("В каталоге загрузки выполните команду и перезапустите SSHI.",
+                      "In your downloads folder, run this command and restart SSHI.") + "\n\nsudo pacman -U ./" + filename
+        elif not asset:
+            hint = tr("Выберите пакет для вашей системы на странице релиза. ", "Choose the package for your system on the release page. ") + hint
+        dialog.format_secondary_text(hint)
+        dialog.add_buttons(tr("Отмена", "Cancel"), Gtk.ResponseType.CANCEL,
+                           tr("Скачать пакет", "Download package") if asset else tr("Открыть релиз", "Open release"), Gtk.ResponseType.OK)
+        accepted = dialog.run() == Gtk.ResponseType.OK
+        dialog.destroy()
+        if accepted:
+            try:
+                Gtk.show_uri_on_window(parent, asset or info["release_url"], Gdk.CURRENT_TIME)
+            except GLib.Error as error:
+                self.message(str(error), True)
+
     def settings(self):
         dialog = Gtk.Dialog(title=tr("Настройки", "Settings"), transient_for=self, modal=True)
         dialog.add_buttons(tr("Отмена", "Cancel"), Gtk.ResponseType.CANCEL,
@@ -1007,12 +1173,22 @@ class Window(Gtk.Window):
         relay = action(tr("Настройки relay…", "Relay settings…"), lambda: self.safe(lambda: self.relay_settings(dialog)),
                        "network-server-symbolic")
         grid.attach(relay, 0, 1, 2, 1)
-        release = Gtk.LinkButton.new_with_label(RELEASE_URL, tr("Что нового в 0.2.2", "What’s new in 0.2.2"))
+        release = Gtk.LinkButton.new_with_label(RELEASE_URL, tr("Что нового в 0.2.3", "What’s new in 0.2.3"))
         release.set_halign(Gtk.Align.START)
         grid.attach(release, 0, 2, 2, 1)
+        check = action(tr("Проверить обновления", "Check for updates"), self.check_updates)
+        download = action(tr("Обновить…", "Update…"), lambda: self.offer_update(dialog))
+        summary = label("", wrap=True)
+        summary.set_max_width_chars(52)
+        grid.attach(check, 0, 3, 1, 1)
+        grid.attach(download, 1, 3, 1, 1)
+        grid.attach(summary, 0, 4, 2, 1)
+        self.update_settings = (check, download, summary)
         dialog.show_all()
+        self.refresh_update_ui()
         accepted = dialog.run() == Gtk.ResponseType.OK
         selected = language_picker.get_active_id()
+        self.update_settings = None
         dialog.destroy()
         if accepted and selected != language:
             save_language(selected)
@@ -1131,6 +1307,14 @@ class Window(Gtk.Window):
         if accepted and command:
             self.safe(lambda: open_terminal(command, False))
 
+    def control_socket(self, profile):
+        name = profile["name"]
+        path = cli("socket", "path", "--", name)
+        command = cli("socket", "command", "--", name)
+        dialog = ControlSocketDialog(self, name, path, command)
+        dialog.run()
+        dialog.destroy()
+
     def backup(self, restore):
         dialog = Gtk.FileChooserDialog(
             title=tr("Импорт подключений", "Import connections") if restore else tr("Экспорт подключений", "Export connections"), transient_for=self,
@@ -1164,6 +1348,11 @@ def main():
         print("SSHI native window ready")
         window.destroy()
     else:
+        def periodic_check():
+            window.check_updates()
+            return GLib.SOURCE_CONTINUE
+        window.check_updates()
+        GLib.timeout_add_seconds(6 * 60 * 60, periodic_check)
         Gtk.main()
 
 

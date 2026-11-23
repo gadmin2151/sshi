@@ -44,6 +44,7 @@ BEGIN
         END
         MENUITEM SEPARATOR
         MENUITEM "Что нового", 118
+        MENUITEM "Проверить обновления…", 121
     END
 END
 

@@ -57,6 +57,10 @@ def package(path):
                     check(entry.name, archive.extractfile(entry).read() if entry.isfile() else b"")
     elif path.suffix == ".rpm":
         rpm_contents(path)
+    elif path.name.endswith(".pkg.tar.zst"):
+        with tarfile.open(fileobj=io.BytesIO(read("zstd", "-dc", "--", path))) as archive:
+            for entry in archive:
+                check(entry.name, archive.extractfile(entry).read() if entry.isfile() else b"")
     elif path.suffix == ".pkg":
         if sys.platform == "darwin":
             import tempfile

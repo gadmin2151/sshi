@@ -21,7 +21,18 @@ use crate::{
 #[command(name = "sshi-portable-x64", version)]
 struct Cli {
     #[command(subcommand)]
-    command: Operation,
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Check the latest stable GitHub release and show the package for this system.
+    Update {
+        #[arg(long)]
+        json: bool,
+    },
+    #[command(flatten)]
+    Local(Operation),
 }
 
 #[derive(Subcommand)]
@@ -122,8 +133,12 @@ pub fn run(arguments: &[OsString]) -> i32 {
 }
 
 fn execute(cli: Cli, interactive: bool) -> Result<()> {
+    let operation = match cli.command {
+        Command::Update { json } => return run_async(iroh_ssh::update::print_check(json)),
+        Command::Local(operation) => operation,
+    };
     let store = Store::open()?;
-    let (target, action) = match cli.command {
+    let (target, action) = match operation {
         Operation::Id => {
             println!("{}", store.identity()?.public());
             return Ok(());

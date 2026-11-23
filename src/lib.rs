@@ -5,6 +5,7 @@ pub mod local;
 pub mod profiles;
 mod ssh_keys;
 pub mod tunnel;
+pub mod update;
 
 use std::{env, fs::File, future::Future, net::SocketAddr, path::Path};
 
@@ -28,7 +29,7 @@ pub fn shell_arg(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
-pub fn run_async(task: impl Future<Output = Result<()>>) -> Result<()> {
+pub fn run_async<T>(task: impl Future<Output = Result<T>>) -> Result<T> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

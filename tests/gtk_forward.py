@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+from unittest.mock import patch
 
 
 def load_desktop(binary):
@@ -70,7 +71,7 @@ def check(binary, root):
         combo, = [widget for widget in children(dialog) if isinstance(widget, Gtk.ComboBoxText)]
         assert combo.get_active_id() == "ru"
         link, = [widget for widget in children(dialog) if isinstance(widget, Gtk.LinkButton)]
-        assert link.get_uri() == module.RELEASE_URL and link.get_label() == "Что нового в 0.2.2"
+        assert link.get_uri() == module.RELEASE_URL and link.get_label() == "Что нового в 0.2.3"
         combo.set_active_id("en")
         return Gtk.ResponseType.OK
 
@@ -150,8 +151,89 @@ def check(binary, root):
     backup = Path(root) / "backup.json"
     module.cli("backup", str(backup))
     assert not any(word in backup.read_text() for word in ("bind_port", "target_port", "language"))
+    profile = "Test station"
+    path = module.cli("socket", "path", "--", profile)
+    command = module.cli("socket", "command", "--", profile)
+    assert path.startswith("/tmp/") and not Path(path).exists()
+    assert path in command and "ProxyCommand=false" in command and previous[0]["endpoint"] in command
+    update = {"current": "1.0.0", "latest": "1.0.1", "available": True,
+              "download_url": "https://github.com/gadmin2151/sshi/releases/download/v1.0.1/sshi_1.0.1_amd64.deb",
+              "release_url": "https://github.com/gadmin2151/sshi/releases/tag/v1.0.1"}
+    calls = []
+    stopped = False
+
+    def fake_cli(*args, **kwargs):
+        calls.append(args)
+        if args == ("update", "--json"):
+            if not update:
+                raise ValueError("offline")
+            return json.dumps(update)
+        assert args[2:] == ("--", profile)
+        if args[1] == "check" and stopped:
+            raise ValueError("No active SSH control socket")
+        return {"path": path, "command": command, "check": "", "close": ""}[args[1]]
+
+    def complete(work, callback):
+        try:
+            result = work()
+        except ValueError as error:
+            callback(None, str(error))
+        else:
+            callback(result, None)
+
+    def button(dialog, caption):
+        selected, = [item for item in children(dialog) if isinstance(item, Gtk.Button) and item.get_label() == caption]
+        return selected
+
+    def socket_actions(dialog):
+        nonlocal stopped
+        assert dialog.get_title() == "SSH control socket" and len(launched) == 3
+        assert [args[1] for args in calls] == ["path", "command"]
+        assert any(isinstance(item, Gtk.Label) and item.get_text() == command for item in children(dialog))
+        with patch.object(Gtk.Clipboard, "get") as clipboard:
+            button(dialog, "Copy command").clicked()
+            clipboard.return_value.set_text.assert_called_with(command, -1)
+            button(dialog, "Copy path").clicked()
+            clipboard.return_value.set_text.assert_called_with(path, -1)
+        button(dialog, "Check status").clicked()
+        assert "ready" in dialog.status.get_text() and len(launched) == 3
+        button(dialog, "Start socket").clicked()
+        assert launched[-1] == (["socket", "start", "--", profile], False)
+        with_dialog(button(dialog, "Stop socket…").clicked, lambda prompt: Gtk.ResponseType.CANCEL)
+        assert calls[-1][1] == "check"
+        with_dialog(button(dialog, "Stop socket…").clicked, lambda prompt: Gtk.ResponseType.OK)
+        assert calls[-1][1] == "close" and "stopped" in dialog.status.get_text()
+        stopped = True
+        button(dialog, "Check status").clicked()
+        assert dialog.status.get_text() == "The socket is stopped."
+        return Gtk.ResponseType.CLOSE
+
+    def update_actions(dialog):
+        button(dialog, "Check for updates").clicked()
+        assert window.update_badge.get_visible() and "1.0.1" in window.update_badge.get_label()
+        update_button = button(dialog, "Update…")
+        with patch.object(Gtk, "show_uri_on_window") as open_url:
+            with_dialog(update_button.clicked, lambda prompt: Gtk.ResponseType.CANCEL)
+            open_url.assert_not_called()
+            with_dialog(update_button.clicked, lambda prompt: Gtk.ResponseType.OK)
+            assert open_url.call_args.args[1] == update["download_url"]
+            update["download_url"] = None
+            button(dialog, "Check for updates").clicked()
+            with_dialog(update_button.clicked, lambda prompt: Gtk.ResponseType.OK)
+            assert open_url.call_args.args[1] == update["release_url"]
+        update.update(available=False, latest=update["current"])
+        button(dialog, "Check for updates").clicked()
+        assert not window.update_badge.get_visible() and not update_button.get_visible()
+        update.clear()
+        button(dialog, "Check for updates").clicked()
+        assert "offline" in window.update_settings[2].get_text()
+        return Gtk.ResponseType.CANCEL
+
+    with patch.object(module, "cli", fake_cli), patch.object(module, "background", complete):
+        with_dialog(lambda: click_action("SSH control socket…"), socket_actions)
+        with_dialog(lambda: setting("Settings…"), update_actions)
     window.destroy()
-    print("GTK settings persistence, translations, route diagrams, validation and forwarding commands passed")
+    print("GTK settings, translations, port forwarding, control socket actions and update notifications passed")
 
 
 if __name__ == "__main__":

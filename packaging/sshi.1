@@ -1,4 +1,4 @@
-.TH SSHI 1 "2026-11-23" "SSHI 0.2.2" "User Commands"
+.TH SSHI 1 "2026-11-23" "SSHI 0.2.3" "User Commands"
 .SH NAME
 sshi, sshi-copy-id, sshi-copy-iid \- use OpenSSH over an iroh relay
 .SH SYNOPSIS
@@ -7,6 +7,11 @@ sshi, sshi-copy-id, sshi-copy-iid \- use OpenSSH over an iroh relay
 .RB [ \-L " forward" ]
 .RB [ \-R " forward" ]
 .RB [ \-D " address" ]
+.RB [ \-M ]
+.RB [ \-f ]
+.RB [ \-S " control_path" ]
+.RB [ \-O " check|exit" ]
+.RB [ \-o " ControlPersist=time" ]
 .RB [ \-N ]
 .RB [ \-T | \-t ]
 .RB [ \-v ]
@@ -103,6 +108,24 @@ and
 A dynamic forward is a local SOCKS proxy. Applications choose their own destinations.
 Ports range from 1 through 65535. IPv6 addresses may be entered with or without brackets.
 Press Ctrl+C in the forwarding terminal to stop.
+.TP
+.B socket start [\-\-persist TIME] PROFILE
+Authenticate through the selected Iroh relay, then create a local OpenSSH control
+socket in a private directory under /tmp. Starting the same active master again
+returns its socket path. The default idle timeout is 700 minutes.
+.TP
+.B socket path|command PROFILE
+Print the local socket path or a quoted shell command for connecting through it.
+Append a remote command or use it as printed for an interactive shell.
+Both operations work before a socket has been opened.
+.TP
+.B socket check|close PROFILE
+Check whether the local SSH master is running, or stop it and its attached sessions.
+.TP
+.B update [\-\-json]
+Check the latest stable release on GitHub and show the package for the current
+platform, or the release page when no matching package is available. The graphical
+client checks in the background and offers a download when a newer version exists.
 .TP
 .B backup FILE
 Write all named connections and connection history to a new portable JSON file.

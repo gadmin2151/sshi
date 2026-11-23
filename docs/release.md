@@ -1,28 +1,21 @@
-## SSHI 0.2.2 · Первое подключение
+# SSHI 0.2.3
 
-**Если у вас уже есть ID получателя и код**, откройте новое подключение по приглашению. Вставьте ID удалённого компьютера в поле получателя, код — в поле приглашения. Укажите пользователя SSH на удалённом компьютере и подтвердите вход.
+### Обновления с GitHub
 
-### Добавлено
+- На Windows, macOS и Linux SSHI проверяет стабильные выпуски при открытии и пока работает. При появлении новой версии в главном окне появляется кнопка с её номером.
+- Нажмите кнопку, чтобы скачать пакет для своего компьютера. На Windows после загрузки закройте старый EXE и запустите новый. На macOS и Linux откройте пакет в установщике. Проверку можно запустить вручную в настройках или командой `sshi update`.
+- Для Arch Linux и CachyOS x86-64 в релиз добавлен пакет для pacman. На других Linux-системах клиент подбирает DEB или RPM с учётом архитектуры. Если подходящего пакета нет, он предлагает страницу выпуска.
 
-- На macOS, Windows и Linux приглашение можно принять из пустого списка подключений. В той же форме можно скопировать свой публичный Endpoint ID для владельца сервера.
-- Владелец может передать одну ссылку с ID получателя, пользователем SSH и адресом relay. Клиент показывает эти параметры перед подключением. Токен частного relay вводится отдельно.
-- На принимающем компьютере с Linux или macOS команда `sshi invite "$CLIENT_ID" --share --user pi` создаёт ссылку для конкретного гостя. На уже доверенном компьютере полную ссылку можно выпустить через сохранённое SSH-подключение.
-- При вводе просроченного кода или кода для другого устройства можно исправить данные и попробовать снова. В сохранённом профиле и резервной копии хранятся параметры подключения.
-- Обычный интерактивный вход `sshi user@ID` или `sshi connect ИМЯ` предлагает вставить приглашение, когда получатель отклонил Iroh ID. SSHI показывает ID клиента и продолжает SSH-вход после подтверждения.
+### Локальный SSH-сокет
 
-### Исправлено
+- В графическом клиенте Linux и macOS выберите профиль и откройте **SSH-сокет… → Запустить**. После входа можно скопировать команду для другого терминала или Codex. Она использует тот же SSH-вход через Iroh.
+- В CLI доступны `sshi socket start`, `path`, `command`, `check` и `close` с именем профиля. Повторный запуск использует уже открытое соединение. Команда `close` закрывает также сеансы на этом сокете.
+- По умолчанию мастер ждёт 700 минут после последнего сеанса. Чтобы задать другой срок, запустите новый сокет, например командой `sshi socket start --persist 30m "Мастерская"`. Для собственного пути OpenSSH поддерживаются флаги `-M`, `-N`, `-f`, `-S`, `-O` и `-o ControlPersist=…`.
 
-- Для первого входа гостю больше не нужно заранее сохранять профиль и искать, куда ввести код. Обычный код, полученный от старой версии SSHI, работает вместе с ID получателя.
-- На экране подключения отдельно обозначены ID этого компьютера и ID получателя. После выдачи доступа через Iroh выполняется обычная SSH-аутентификация.
+### English
 
-## English · First connection
+- Windows, macOS and Linux check GitHub for stable updates in the background. A versioned button opens the download for your system. You can also check from Settings or run `sshi update --json`. Arch and CachyOS x86-64 now have a pacman package.
+- On Linux and macOS, select a saved connection and open **SSH control socket… → Start socket**. Sign in once, then copy the SSH command for another terminal or Codex. Use `sshi socket check PROFILE` for status and `sshi socket close PROFILE` to disconnect.
+- Managed sockets default to a 700-minute idle timeout. The copied SSH command requires a running socket and fails if it has been closed.
 
-If the server owner sent you a receiver ID and a code, open a new connection and choose the invitation option. Paste the remote computer’s ID and the invitation into their respective fields, enter your SSH username, and confirm.
-
-- Join from an empty profile library on macOS, Windows or Linux. Copy your computer’s public ID from the same form when you need an invitation.
-- Paste a full invitation link to preview the receiver, SSH user and relay together. Older invitation codes work with a separately supplied receiver ID.
-- Issue a shareable link on a Linux or macOS receiver with `sshi invite "$CLIENT_ID" --share --user pi`, or create one through an authorized connection. Invitations are tied to the guest’s identity and expire after ten minutes.
-- After enrollment the client saves the connection and uses normal SSH authentication. On a private relay, obtain its access token from the administrator.
-- On first interactive login, `sshi user@ID` or `sshi connect NAME` prompts for a code or link if the receiver denies that client’s Iroh ID, then continues the SSH login.
-
-[Установка и первый вход / Setup and first connection](https://github.com/gadmin2151/sshi/blob/v0.2.2/README.md)
+[Руководство и установка / Setup guide](https://github.com/gadmin2151/sshi/blob/v0.2.3/README.md)

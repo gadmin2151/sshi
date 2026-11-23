@@ -7,11 +7,13 @@ use std::{
     path::PathBuf,
     process::Command,
     ptr::{null, null_mut},
+    sync::mpsc::{self, Receiver, TryRecvError},
+    thread,
 };
 
 use anyhow::{Context, Result, bail, ensure};
 use iroh::EndpointId;
-use iroh_ssh::relay_url;
+use iroh_ssh::{relay_url, update::UpdateInfo};
 use windows_sys::Win32::{
     Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM},
     Graphics::Gdi::{
@@ -74,6 +76,11 @@ const LANG_EN: u16 = 117;
 const WHATS_NEW: u16 = 118;
 const EMPTY_JOIN: u16 = 119;
 const MANUAL: u16 = 120;
+const CHECK_UPDATES: u16 = 121;
+const OPEN_UPDATE: u16 = 122;
+const UPDATE_TIMER: usize = 1;
+const UPDATE_RESULT_TIMER: usize = 2;
+const UPDATE_INTERVAL_MS: u32 = 6 * 60 * 60 * 1000;
 const APP_MENU_RESOURCE: usize = 3;
 const STYLE: u32 = WS_OVERLAPPEDWINDOW;
 
@@ -85,6 +92,7 @@ const COPY_INVITATION: i32 = 2002;
 struct Controls {
     title: HWND,
     caption: HWND,
+    update: HWND,
     list: HWND,
     empty_help: HWND,
     empty_join: HWND,
@@ -107,12 +115,19 @@ struct View {
     clicked: Option<usize>,
     rename_armed: bool,
     controls: Controls,
+    check: Option<UpdateCheck>,
+    available: Option<UpdateInfo>,
     font: HFONT,
     title_font: HFONT,
     header_brush: windows_sys::Win32::Graphics::Gdi::HBRUSH,
     header_icon: Icon,
     instance: HINSTANCE,
     layout: RefCell<Vec<ChildLayout>>,
+}
+
+struct UpdateCheck {
+    result: Receiver<Result<UpdateInfo>>,
+    manual: bool,
 }
 
 struct ChildLayout {
@@ -189,6 +204,8 @@ pub fn show(store: Store) -> Result<()> {
         clicked: None,
         rename_armed: false,
         controls: Controls::default(),
+        check: None,
+        available: None,
         font: font(-16, 400),
         title_font: font(-30, 700),
         header_brush: unsafe { CreateSolidBrush(HEADER) },
@@ -236,7 +253,9 @@ pub fn show(store: Store) -> Result<()> {
         );
         view.borrow().apply_language(root);
         ShowWindow(root, SW_SHOW);
+        SetTimer(root, UPDATE_TIMER, UPDATE_INTERVAL_MS, None);
     }
+    let _ = view.borrow_mut().check_updates(root, false);
     let mut message: MSG = unsafe { std::mem::zeroed() };
     loop {
         match unsafe { GetMessageW(&mut message, null_mut(), 0, 0) } {
@@ -387,6 +406,16 @@ unsafe extern "system" fn window_proc(
                 }
                 return 0;
             }
+            WM_TIMER if wparam == UPDATE_TIMER || wparam == UPDATE_RESULT_TIMER => {
+                if let Ok(mut view) = view.try_borrow_mut() {
+                    if wparam == UPDATE_TIMER {
+                        let _ = view.check_updates(hwnd, false);
+                    } else if let Err(error) = view.receive_update(hwnd) {
+                        message_box(hwnd, &format!("{error:#}"), MB_ICONERROR);
+                    }
+                }
+                return 0;
+            }
             WM_SIZE if wparam != SIZE_MINIMIZED as usize => {
                 if let Ok(view) = view.try_borrow() {
                     let mut rect: RECT = unsafe { std::mem::zeroed() };
@@ -450,7 +479,9 @@ impl View {
     fn create_controls(&mut self, hwnd: HWND) -> Result<()> {
         self.controls.title = self.label(hwnd, "sshi", [74, 16, 83, 40])?;
         unsafe { SendMessageW(self.controls.title, WM_SETFONT, self.title_font as usize, 1) };
-        self.controls.caption = self.label(hwnd, "SSH через iroh", [162, 28, 355, 23])?;
+        self.controls.caption = self.label(hwnd, "SSH через iroh", [162, 28, 240, 23])?;
+        self.controls.update = self.button(hwnd, "", [414, 20, 273, 32], OPEN_UPDATE)?;
+        unsafe { ShowWindow(self.controls.update, SW_HIDE) };
         self.button(hwnd, "Папка данных", [698, 20, 132, 32], OPEN_DATA)?;
 
         self.label(hwnd, "Подключения", [22, 92, 236, 23])?;
@@ -594,7 +625,7 @@ impl View {
         unsafe { SendMessageW(result, WM_SETFONT, self.font as usize, 1) };
         let horizontal = match id {
             OPEN_DATA | BROWSE | COPY | ENROLL | INSTALL_SSH_KEY | ISSUE_INVITE | SAVE
-            | CONNECT | FORWARD => Anchor::End,
+            | CONNECT | FORWARD | OPEN_UPDATE => Anchor::End,
             _ if is_edit && rect[2] >= 400 => Anchor::Stretch,
             _ => Anchor::Start,
         };
@@ -676,6 +707,12 @@ impl View {
                     tr("&Восстановить из копии…", "&Restore from backup…"),
                 ),
                 (settings, WHATS_NEW, 0, release.as_str()),
+                (
+                    settings,
+                    CHECK_UPDATES,
+                    0,
+                    tr("Проверить обновления…", "Check for updates…"),
+                ),
             ] {
                 let mut title = wide(name);
                 let info = MENUITEMINFOW {
@@ -696,6 +733,134 @@ impl View {
             );
             DrawMenuBar(hwnd);
         }
+        self.refresh_update_button();
+    }
+
+    fn check_updates(&mut self, hwnd: HWND, manual: bool) -> Result<()> {
+        if let Some(check) = &mut self.check {
+            check.manual |= manual;
+        } else {
+            let (sender, result) = mpsc::channel();
+            ensure!(
+                unsafe { SetTimer(hwnd, UPDATE_RESULT_TIMER, 250, None) } != 0,
+                tr(
+                    "Не удалось начать проверку обновлений",
+                    "Could not start the update check"
+                )
+            );
+            if let Err(error) =
+                thread::Builder::new()
+                    .name("sshi-updates".into())
+                    .spawn(move || {
+                        let _ = sender.send(iroh_ssh::run_async(iroh_ssh::update::check()));
+                    })
+            {
+                unsafe { KillTimer(hwnd, UPDATE_RESULT_TIMER) };
+                return Err(error.into());
+            }
+            self.check = Some(UpdateCheck { result, manual });
+        }
+        if manual {
+            self.status(tr(
+                "Проверяем обновления на GitHub…",
+                "Checking GitHub for updates…",
+            ));
+        }
+        Ok(())
+    }
+
+    fn receive_update(&mut self, hwnd: HWND) -> Result<()> {
+        let Some(check) = &self.check else {
+            return Ok(());
+        };
+        let result = match check.result.try_recv() {
+            Err(TryRecvError::Empty) => return Ok(()),
+            Err(TryRecvError::Disconnected) => Err(anyhow::anyhow!(tr(
+                "Проверка обновлений прервалась",
+                "The update check was interrupted"
+            ))),
+            Ok(result) => result,
+        };
+        let manual = check.manual;
+        self.check = None;
+        unsafe { KillTimer(hwnd, UPDATE_RESULT_TIMER) };
+        if manual {
+            self.status("");
+        }
+        match result {
+            Ok(info) => {
+                self.available = info.available.then_some(info);
+                self.refresh_update_button();
+                if manual {
+                    if self.available.is_some() {
+                        self.offer_update(hwnd)?;
+                    } else {
+                        let text = tr_format!(
+                            "У вас актуальная версия SSHI {}.",
+                            "SSHI {} is up to date.",
+                            env!("CARGO_PKG_VERSION")
+                        );
+                        message_box(hwnd, &text, MB_ICONINFORMATION);
+                    }
+                }
+            }
+            Err(error) if manual => {
+                let text = tr_format!(
+                    "Не удалось проверить обновления SSHI {} на GitHub.\n\n{}\n\nПовторить попытку?",
+                    "SSHI {} could not check GitHub for updates.\n\n{}\n\nTry again?",
+                    env!("CARGO_PKG_VERSION"),
+                    format!("{error:#}")
+                );
+                if message_box(hwnd, &text, MB_RETRYCANCEL | MB_ICONWARNING) == IDRETRY {
+                    self.check_updates(hwnd, true)?;
+                }
+            }
+            Err(_) => {}
+        }
+        Ok(())
+    }
+
+    fn refresh_update_button(&self) {
+        let button = self.controls.update;
+        if let Some(info) = &self.available {
+            set_text(
+                button,
+                &tr_format!("Обновить до {}…", "Update to {}…", info.latest),
+            );
+            unsafe { ShowWindow(button, SW_SHOWNA) };
+        } else {
+            unsafe { ShowWindow(button, SW_HIDE) };
+        }
+    }
+
+    fn offer_update(&self, hwnd: HWND) -> Result<()> {
+        let Some(info) = &self.available else {
+            return Ok(());
+        };
+        let (url, action) = match &info.download_url {
+            Some(url) => (
+                url,
+                tr("Скачать EXE с GitHub?", "Download the EXE from GitHub?"),
+            ),
+            None => (
+                &info.release_url,
+                tr(
+                    "Открыть страницу релиза на GitHub?",
+                    "Open the release page on GitHub?",
+                ),
+            ),
+        };
+        let text = tr_format!(
+            "Доступна версия SSHI {}. Сейчас установлена {}.\n\nПосле загрузки закройте свои окна SSHI и замените старый EXE новым. Подключения хранятся отдельно.\n\n{}",
+            "SSHI {} is available. You have {}.\n\nAfter downloading, close your SSHI windows and replace the old EXE with the new one. Your saved connections are stored separately.\n\n{}",
+            info.latest,
+            info.current,
+            action
+        );
+        if message_box(hwnd, &text, MB_YESNO | MB_ICONINFORMATION) == IDYES {
+            open_web_page(hwnd, url)?;
+        }
+        Ok(())
     }
 
     fn command(&mut self, hwnd: HWND, id: u16, event: u16) -> Result<()> {
@@ -705,29 +870,16 @@ impl View {
                 self.apply_language(hwnd);
                 self.status("");
             }
+            CHECK_UPDATES => self.check_updates(hwnd, true)?,
+            OPEN_UPDATE => self.offer_update(hwnd)?,
             WHATS_NEW => {
-                let url = wide(concat!(
-                    "https://github.com/gadmin2151/sshi/releases/tag/v",
-                    env!("CARGO_PKG_VERSION")
-                ));
-                let result = unsafe {
-                    ShellExecuteW(
-                        hwnd,
-                        wide("open").as_ptr(),
-                        url.as_ptr(),
-                        null(),
-                        null(),
-                        SW_SHOW,
-                    )
-                };
-                ensure!(
-                    result as isize > 32,
-                    "{}",
-                    tr(
-                        "Не удалось открыть страницу релиза",
-                        "Could not open the release notes"
-                    )
-                );
+                open_web_page(
+                    hwnd,
+                    concat!(
+                        "https://github.com/gadmin2151/sshi/releases/tag/v",
+                        env!("CARGO_PKG_VERSION")
+                    ),
+                )?;
             }
             NEW | EMPTY_JOIN | ENROLL => {
                 let previous = if id == ENROLL {
@@ -1234,6 +1386,28 @@ fn choose_file(owner: HWND, action: FileAction) -> Result<Option<PathBuf>> {
         .position(|&ch| ch == 0)
         .unwrap_or(filename.len());
     Ok(Some(OsString::from_wide(&filename[..length]).into()))
+}
+
+fn open_web_page(owner: HWND, url: &str) -> Result<()> {
+    let result = unsafe {
+        ShellExecuteW(
+            owner,
+            wide("open").as_ptr(),
+            wide(url).as_ptr(),
+            null(),
+            null(),
+            SW_SHOW,
+        )
+    };
+    ensure!(
+        result as isize > 32,
+        "{}",
+        tr(
+            "Не удалось открыть ссылку в браузере",
+            "Could not open the link in your browser"
+        )
+    );
+    Ok(())
 }
 
 pub fn message_box(owner: HWND, message: &str, style: u32) -> i32 {

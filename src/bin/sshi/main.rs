@@ -1,4 +1,5 @@
 mod config;
+mod control_socket;
 mod copy_iid;
 mod copy_ssh_key;
 mod invitation_cli;
@@ -52,6 +53,25 @@ struct Cli {
     /// Do not execute a remote shell or command.
     #[arg(short = 'N')]
     no_command: bool,
+    /// Create an OpenSSH master connection on the socket selected with -S.
+    #[arg(
+        short = 'M',
+        requires = "control_path",
+        conflicts_with = "control_command"
+    )]
+    master: bool,
+    /// Local OpenSSH control socket for this connection.
+    #[arg(short = 'S', value_name = "SOCKET")]
+    control_path: Option<PathBuf>,
+    /// Check or stop an existing OpenSSH master.
+    #[arg(short = 'O', value_name = "OPERATION", requires = "control_path", value_parser = ["check", "exit"])]
+    control_command: Option<String>,
+    /// Set the idle lifetime of an OpenSSH master, e.g. -o ControlPersist=700m.
+    #[arg(short = 'o', value_name = "ControlPersist=TIME", requires = "control_path", value_parser = control_persist)]
+    persist: Option<String>,
+    /// Background OpenSSH after authentication.
+    #[arg(short = 'f', conflicts_with = "control_command")]
+    background: bool,
     /// Disable remote pseudo-terminal allocation.
     #[arg(short = 'T')]
     no_tty: bool,
@@ -61,9 +81,9 @@ struct Cli {
     /// Increase OpenSSH verbosity. May be repeated.
     #[arg(short = 'v', action = ArgAction::Count)]
     verbose: u8,
-    /// User account and iroh Endpoint ID of the receiving computer.
-    #[arg(value_name = "USER@ENDPOINT_ID")]
-    destination: Option<Destination>,
+    /// Saved connection name or user account and iroh Endpoint ID.
+    #[arg(value_name = "USER@ENDPOINT_ID|PROFILE")]
+    destination: Option<String>,
     /// Optional remote command and its arguments.
     #[arg(
         trailing_var_arg = true,
@@ -77,6 +97,16 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Action {
+    /// Manage a local OpenSSH control socket for a saved Iroh connection.
+    Socket {
+        #[command(subcommand)]
+        command: control_socket::Action,
+    },
+    /// Check the latest stable GitHub release and show the package for this system.
+    Update {
+        #[arg(long)]
+        json: bool,
+    },
     /// Print this user's persistent iroh Endpoint ID.
     Id,
     /// List successfully authenticated SSH destinations, most recent first.
@@ -217,6 +247,8 @@ fn main() -> Result<()> {
     }
     let cli = Cli::parse();
     match cli.action {
+        Some(Action::Socket { command }) => control_socket::run(command),
+        Some(Action::Update { json }) => run_async(iroh_ssh::update::print_check(json)),
         Some(Action::Id) => {
             println!("{}", State::load()?.id()?);
             Ok(())
@@ -300,8 +332,25 @@ fn main() -> Result<()> {
 }
 
 fn login(cli: &Cli) -> Result<()> {
-    let Some(destination) = &cli.destination else {
-        bail!("specify the receiving computer as USER@ENDPOINT_ID");
+    Err(login_command(cli)?.exec()).context("run OpenSSH")
+}
+
+fn login_command(cli: &Cli) -> Result<Process> {
+    let target = cli
+        .destination
+        .as_deref()
+        .context("specify USER@ENDPOINT_ID or a saved connection name")?;
+    let (destination, profile) = if let Ok(destination) = target.parse::<Destination>() {
+        (destination, None)
+    } else {
+        let profile = profiles::lookup(target)?;
+        (
+            Destination {
+                user: profile.user.clone(),
+                endpoint: profile.endpoint,
+            },
+            Some(profile),
+        )
     };
     let endpoint = destination.endpoint.to_string();
     let exe = quoted_sshi_executable()?;
@@ -312,7 +361,27 @@ fn login(cli: &Cli) -> Result<()> {
         && io::stdout().is_terminal()
         && io::stderr().is_terminal())
     .then_some(destination.user.as_str());
-    let mut ssh = ssh_over_iroh(destination.endpoint, &exe, invite_user);
+    let mut ssh = ssh_over_iroh(
+        destination.endpoint,
+        &exe,
+        invite_user,
+        cli.control_path.as_deref(),
+    );
+    if let Some(profile) = profile {
+        profiles::set_relay(&mut ssh, &profile);
+    }
+    if cli.master {
+        ssh.arg("-M");
+    }
+    if let Some(command) = &cli.control_command {
+        ssh.args(["-O", command]);
+    }
+    if let Some(value) = &cli.persist {
+        ssh.arg("-o").arg(format!("ControlPersist={value}"));
+    }
+    if cli.background {
+        ssh.arg("-f");
+    }
     // OpenSSH owns authentication, host keys, signals, port forwarding and the exit status.
     ssh.args(["-o", "PermitLocalCommand=yes"])
         .arg("-o")
@@ -357,7 +426,7 @@ fn login(cli: &Cli) -> Result<()> {
         .arg(endpoint)
         .args(&cli.remote_command);
 
-    Err(ssh.exec()).context("run OpenSSH")
+    Ok(ssh)
 }
 
 fn quoted_sshi_executable() -> Result<String> {
@@ -373,29 +442,55 @@ impl Cli {
         self.remote_command.is_empty()
             && !self.no_tty
             && !self.no_command
+            && !self.background
+            && self.control_command.is_none()
             && self.local.is_empty()
             && self.remote.is_empty()
             && self.dynamic.is_empty()
     }
 }
 
-fn ssh_over_iroh(endpoint: EndpointId, exe: &str, invite_user: Option<&str>) -> Process {
+fn control_persist(option: &str) -> Result<String, String> {
+    let (key, value) = option
+        .split_once('=')
+        .or_else(|| option.split_once(char::is_whitespace))
+        .ok_or("expected -o ControlPersist=TIME")?;
+    if !key.trim().eq_ignore_ascii_case("ControlPersist") {
+        return Err("the supported -o option is ControlPersist=TIME".into());
+    }
+    let value = value.trim();
+    if !(value.eq_ignore_ascii_case("yes")
+        || value.eq_ignore_ascii_case("no")
+        || value.starts_with(|c: char| c.is_ascii_digit())
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_digit() || b"smhdw".contains(&b.to_ascii_lowercase())))
+    {
+        return Err("expected yes, no or an OpenSSH time such as 700m".into());
+    }
+    Ok(value.to_owned())
+}
+
+fn ssh_over_iroh(
+    endpoint: EndpointId,
+    exe: &str,
+    invite_user: Option<&str>,
+    control_path: Option<&Path>,
+) -> Process {
     let mut ssh = Process::new("ssh");
     let mut proxy = format!("ProxyCommand={exe} __proxy {endpoint}");
     if let Some(user) = invite_user {
         proxy.push_str(" --invite-user ");
         proxy.push_str(&ssh_shell_arg(user));
     }
+    if let Some(path) = control_path {
+        ssh.arg("-S").arg(path);
+    } else {
+        ssh.args(["-o", "ControlPath=none"]);
+    }
     ssh.arg("-o")
         .arg(proxy)
-        .args([
-            "-o",
-            "ProxyUseFdpass=no",
-            "-o",
-            "ControlPath=none",
-            "-o",
-            "CanonicalizeHostname=no",
-        ])
+        .args(["-o", "ProxyUseFdpass=no", "-o", "CanonicalizeHostname=no"])
         .arg("-o")
         .arg(format!("HostKeyAlias={endpoint}"));
     ssh
@@ -404,4 +499,79 @@ fn ssh_over_iroh(endpoint: EndpointId, exe: &str, invite_user: Option<&str>) -> 
 fn ssh_shell_arg(value: &str) -> String {
     // OpenSSH expands percent tokens before the user's shell receives the command.
     iroh_ssh::shell_arg(&value.replace('%', "%%"))
+}
+
+#[cfg(test)]
+mod control_tests {
+    use super::*;
+    use iroh::SecretKey;
+
+    #[test]
+    fn master_uses_explicit_socket_with_the_same_endpoint_and_proxy() -> Result<()> {
+        let endpoint = SecretKey::generate().public();
+        let target = format!("pi@{endpoint}");
+        let cli = Cli::try_parse_from([
+            "sshi",
+            "-fMN",
+            "-S",
+            "/tmp/desk socket",
+            "-o",
+            "ControlPersist=700m",
+            &target,
+        ])?;
+        assert!(!cli.interactive_shell());
+        let ssh = login_command(&cli)?;
+        let args: Vec<_> = ssh.get_args().map(|s| s.to_str().unwrap()).collect();
+        assert!(args.windows(2).any(|a| a == ["-S", "/tmp/desk socket"]));
+        assert!(args.windows(2).any(|a| a == ["-o", "ControlPersist=700m"]));
+        for flag in ["-M", "-f", "-N"] {
+            assert!(args.contains(&flag));
+        }
+        assert!(!args.contains(&"ControlPath=none"));
+        assert!(
+            args.iter()
+                .any(|s| s.starts_with("ProxyCommand=")
+                    && s.ends_with(&format!("__proxy {endpoint}")))
+        );
+        assert!(args.contains(&format!("HostKeyAlias={endpoint}").as_str()));
+
+        let cli = Cli::try_parse_from(["sshi", &target])?;
+        assert!(
+            login_command(&cli)?
+                .get_args()
+                .any(|a| a == "ControlPath=none")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn socket_operations_keep_options_separate_from_remote_commands() -> Result<()> {
+        let endpoint = SecretKey::generate().public();
+        let target = format!("pi@{endpoint}");
+        for operation in ["check", "exit"] {
+            let cli = Cli::try_parse_from(["sshi", "-S", "test.sock", "-O", operation, &target])?;
+            assert!(!cli.interactive_shell());
+            let ssh = login_command(&cli)?;
+            let args: Vec<_> = ssh.get_args().map(|s| s.to_str().unwrap()).collect();
+            assert!(args.windows(2).any(|a| a == ["-O", operation]));
+        }
+        let cli = Cli::try_parse_from(["sshi", "-S", "test.sock", &target, "echo", "-M"])?;
+        let ssh = login_command(&cli)?;
+        let args: Vec<_> = ssh.get_args().map(|s| s.to_str().unwrap()).collect();
+        assert!(args.ends_with(&[&endpoint.to_string(), "echo", "-M"]));
+        assert!(Cli::try_parse_from(["sshi", "-M", &target]).is_err());
+        assert!(Cli::try_parse_from(["sshi", "-O", "check", &target]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "sshi",
+                "-S",
+                "test.sock",
+                "-o",
+                "ProxyCommand=false",
+                &target
+            ])
+            .is_err()
+        );
+        Ok(())
+    }
 }

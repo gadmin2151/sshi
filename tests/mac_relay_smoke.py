@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import pwd
+import shlex
 import shutil
 import socket
 import subprocess
@@ -168,6 +169,39 @@ def smoke(base):
         assert rx_log.read_text().count(f"Shared iroh connection from {client}") == baseline + 1, rx_log.read_text()
         wait("broker shutdown", lambda: not (base / "tx/sshi/proxy.sock").exists(), timeout=15)
         print("Two overlapping named SSH sessions authenticated, shared one Iroh connection and closed cleanly", flush=True)
+
+        control = [sshi, "socket"]
+        path = Path(command(control + ["path", "--", profile], tx).stdout.decode().strip())
+        native = shlex.split(command(control + ["command", "--", profile], tx).stdout.decode())
+        assert native[0] == "ssh" and native[-1] == destination and str(path) in native
+        assert not path.exists() and command(native + ["true"], tx, check=False).returncode != 0
+        baseline = rx_log.read_text().count(f"Shared iroh connection from {client}")
+        auth = ssh_log.read_text().count(f"Accepted publickey for {user} ")
+        try:
+            # File-backed output lets a background master finish detaching even if
+            # an OpenSSH version leaves diagnostic descriptors open in its proxy.
+            start_log = base / "socket-start.log"
+            with start_log.open("wb") as output:
+                start = subprocess.run(control + ["start", "--persist", "1m", "--", profile], env=tx,
+                                       stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT, timeout=30)
+            assert start.returncode == 0, start_log.read_text(errors="replace")
+            assert path.is_socket() and path.parent.stat().st_mode & 0o077 == 0
+            command(control + ["check", "--", profile], tx)
+            first = command(native + ["printf via-local-socket; exit 37"], tx, check=False)
+            assert first.stdout == b"via-local-socket" and first.returncode == 37, first
+            assert command(native + ["id -un"], tx).stdout.decode().strip() == user
+            assert rx_log.read_text().count(f"Shared iroh connection from {client}") == baseline + 1
+            assert ssh_log.read_text().count(f"Accepted publickey for {user} ") == auth + 1
+        finally:
+            if path.is_socket():
+                command(control + ["close", "--", profile], tx)
+                wait("control socket removal", lambda: not path.exists(), timeout=10)
+        assert command(control + ["check", "--", profile], tx, check=False).returncode != 0
+        assert command(native + ["true"], tx, check=False).returncode != 0
+        wait("socket broker shutdown", lambda: not (base / "tx/sshi/proxy.sock").exists(), timeout=15)
+        # The fixture owns this unique endpoint and has no concurrent clients.
+        path.with_suffix(".lock").unlink(missing_ok=True)
+        print("Managed socket started through Iroh, reused one SSH login, and closed cleanly", flush=True)
 
 
 if __name__ == "__main__":

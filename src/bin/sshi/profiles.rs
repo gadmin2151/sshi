@@ -72,12 +72,16 @@ pub fn lookup(name: &str) -> Result<Profile> {
 
 pub fn command(profile: &Profile) -> Result<Command> {
     let mut command = Command::new(env::current_exe()?);
+    set_relay(&mut command, profile);
+    Ok(command)
+}
+
+pub fn set_relay(command: &mut Command, profile: &Profile) {
     if profile.relay.is_empty() {
         command.env_remove(PROFILE_RELAY);
     } else {
         command.env(PROFILE_RELAY, &profile.relay);
     }
-    Ok(command)
 }
 
 pub fn run(action: Profiles) -> Result<()> {

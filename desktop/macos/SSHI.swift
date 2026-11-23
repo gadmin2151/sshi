@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Foundation
 import SwiftUI
 import UniformTypeIdentifiers
@@ -12,6 +13,21 @@ struct Profile: Codable, Equatable, Identifiable {
     var id: String { name }
     var destination: String { "\(user)@\(endpoint)" }
     var prefix: [String] { ["profile", "run", "--name", name, "--"] }
+    func socket(_ action: String) -> [String] { ["socket", action, "--", name] }
+}
+
+struct ReleaseUpdate: Decodable {
+    let current: String
+    let latest: String
+    let available: Bool
+    let release_url: URL
+    let download_url: URL?
+
+    static func fetch() async throws -> Self {
+        try await Task.detached(priority: .utility) {
+            try JSONDecoder().decode(Self.self, from: Client.run(["update", "--json"]))
+        }.value
+    }
 }
 
 struct RelaySettings: Decodable {
@@ -100,6 +116,7 @@ struct SheetItem: Identifiable {
     enum Content {
         case editor(Panel)
         case invitation(InvitationStart)
+        case socket(Profile)
     }
     let content: Content
 }
@@ -112,6 +129,38 @@ final class Workspace: ObservableObject {
     @Published var sheet: SheetItem?
     @Published var feedback: String?
     @Published var busy = false
+    @Published var update: ReleaseUpdate?
+    @Published var checkingUpdate = false
+    @Published var updateError: String?
+
+    func checkUpdates(fetch: () async throws -> ReleaseUpdate = ReleaseUpdate.fetch) async {
+        guard !checkingUpdate else { return }
+        checkingUpdate = true
+        updateError = nil
+        defer { checkingUpdate = false }
+        do {
+            update = try await fetch()
+        } catch { updateError = error.localizedDescription }
+    }
+
+    func offerUpdate(_ language: AppLanguage) {
+        guard let update = update, update.available else { return }
+        let alert = NSAlert()
+        alert.messageText = language("Обновить SSHI до \(update.latest)?", "Update SSHI to \(update.latest)?")
+        let steps = language("Откройте скачанный пакет .pkg, завершите установку и снова откройте SSHI.",
+                             "Open the downloaded .pkg, finish the installation, and reopen SSHI.")
+        alert.informativeText = update.download_url == nil
+            ? language("На странице релиза выберите пакет для Mac. ", "On the release page, choose the Mac package. ") + steps
+            : steps
+        alert.addButton(withTitle: update.download_url == nil ? language("Открыть релиз", "Open release") : language("Скачать пакет", "Download package"))
+        alert.addButton(withTitle: language("Отмена", "Cancel"))
+        if alert.runModal() == .alertFirstButtonReturn {
+            if !NSWorkspace.shared.open(update.download_url ?? update.release_url) {
+                updateError = language("Не удалось открыть ссылку в браузере.", "Could not open the link in your browser.")
+                feedback = updateError
+            }
+        }
+    }
 
     var visible: [Profile] {
         guard !query.isEmpty else { return profiles }
@@ -140,7 +189,7 @@ final class Workspace: ObservableObject {
         }
     }
 
-    func launch(_ arguments: [String], hold: Bool = true) {
+    func launch(_ arguments: [String], hold: Bool = true, onError: ((String) -> Void)? = nil) {
         // The initial Terminal automation consent may block until the user responds.
         busy = true
         DispatchQueue.global(qos: .userInitiated).async {
@@ -150,7 +199,8 @@ final class Workspace: ObservableObject {
             } catch {
                 DispatchQueue.main.async {
                     self.busy = false
-                    self.feedback = error.localizedDescription
+                    if let onError = onError { onError(error.localizedDescription) }
+                    else { self.feedback = error.localizedDescription }
                 }
             }
         }
@@ -243,6 +293,9 @@ struct ProfileDetail: View {
                         Button(language("Установить SSH-ключ…", "Install SSH key…")) { workspace.show(.key(profile)) }
                     }.fixedSize()
                     Button(language("Пробросить порт…", "Forward a port…")) { workspace.show(.forward(profile)) }
+                }
+                Button(language("SSH-сокет…", "SSH control socket…")) {
+                    workspace.sheet = SheetItem(content: .socket(profile))
                 }
             }.padding(30).frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -517,7 +570,11 @@ struct WorkspaceView: View {
                 }
             } else {
                 workspace.perform { try workspace.reload() }
+                Task { await workspace.checkUpdates() }
             }
+        }
+        .onReceive(Timer.publish(every: 6 * 60 * 60, on: .main, in: .common).autoconnect()) { _ in
+            if !CommandLine.arguments.contains("--smoke-test") { Task { await workspace.checkUpdates() } }
         }
         .onChange(of: workspace.query) { _ in
             if workspace.current == nil { workspace.selected = workspace.visible.first?.name }
@@ -525,6 +582,11 @@ struct WorkspaceView: View {
         .toolbar {
             ToolbarItemGroup(placement: .automatic) {
                 if workspace.busy { ProgressView().controlSize(.small) }
+                if let update = workspace.update, update.available {
+                    Button(language("Обновить до \(update.latest)", "Update to \(update.latest)")) {
+                        workspace.offerUpdate(language)
+                    }
+                }
                 Button { workspace.showInvitation(.join(nil)) } label: { Label(language("Новое подключение", "New connection"), systemImage: "plus") }
                     .keyboardShortcut("n").help(language("Новое подключение", "New connection"))
                 Button { workspace.show(.settings) } label: { Label(language("Настройки", "Settings"), systemImage: "gearshape") }
@@ -545,11 +607,104 @@ struct WorkspaceView: View {
             switch item.content {
             case .editor(let panel): Editor(workspace: workspace, panel: panel)
             case .invitation(let start): InvitationSheet(workspace: workspace, start: start)
+            case .socket(let profile): SocketSheet(workspace: workspace, profile: profile, language: language)
             }
         }
         .alert("SSHI", isPresented: Binding(get: { workspace.feedback != nil }, set: { if !$0 { workspace.feedback = nil } })) {
             Button("OK") { workspace.feedback = nil }
         } message: { Text(workspace.feedback ?? "") }
+    }
+}
+
+private struct SocketSheet: View {
+    @ObservedObject var workspace: Workspace
+    let profile: Profile
+    let language: AppLanguage
+    @State private var path = ""
+    @State private var command = ""
+    @State private var status = ""
+    @State private var busy = false
+    @State private var confirmStop = false
+
+    private func output(_ operation: String) async throws -> String {
+        let args = profile.socket(operation)
+        return try await Task.detached(priority: .userInitiated) {
+            String(decoding: try Client.run(args), as: UTF8.self).trimmingCharacters(in: .newlines)
+        }.value
+    }
+
+    private func field(_ title: String, _ value: String, _ copy: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title).font(.headline)
+            Text(value).font(.system(.body, design: .monospaced))
+                .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+            Button(copy) {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(value, forType: .string)
+                status = language("Скопировано.", "Copied.")
+            }.disabled(value.isEmpty)
+        }
+    }
+
+    private func control(_ operation: String) {
+        busy = true
+        Task {
+            defer { busy = false }
+            do {
+                _ = try await output(operation)
+                status = operation == "check"
+                    ? language("Сокет готов. Можно использовать команду SSH.", "The socket is ready. You can use the SSH command.")
+                    : language("Сокет остановлен.", "The socket is stopped.")
+            } catch {
+                status = error.localizedDescription.localizedCaseInsensitiveContains("no active ssh control socket")
+                    ? language("Сокет не запущен.", "The socket is stopped.") : error.localizedDescription
+            }
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 13) {
+            Text(language("SSH-сокет", "SSH control socket")).font(.title2.bold())
+            Text(profile.name).font(.headline)
+            Text(language("Запустите сокет и войдите через Терминал. Затем передайте команду Codex или выполните её в другом окне.",
+                          "Start the socket and sign in through Terminal. Then give the command to Codex or run it in another window."))
+                .fixedSize(horizontal: false, vertical: true)
+            Divider()
+            field(language("Путь на этом Mac", "Path on this Mac"), path, language("Скопировать путь", "Copy path"))
+            field(language("Команда SSH", "SSH command"), command, language("Скопировать команду", "Copy command"))
+            HStack {
+                Button(language("Запустить", "Start socket")) {
+                    status = language("Завершите вход в Терминале, затем нажмите «Проверить».",
+                                      "Complete sign-in in Terminal, then select Check status.")
+                    workspace.launch(profile.socket("start"), hold: false) { message in status = message }
+                }.buttonStyle(.borderedProminent).disabled(workspace.busy)
+                Button(language("Проверить", "Check status")) { control("check") }
+                Button(language("Остановить…", "Stop socket…")) { confirmStop = true }
+            }.disabled(busy || command.isEmpty)
+            Text(language("По умолчанию сокет закрывается после 11 ч 40 мин без активных сеансов.",
+                          "By default, the socket closes after 11 hours and 40 minutes without an active session."))
+                .font(.callout).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
+            if !status.isEmpty {
+                Text(status).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+            }
+            HStack {
+                Spacer()
+                Button(language("Готово", "Done")) { workspace.sheet = nil }.keyboardShortcut(.cancelAction)
+            }
+        }
+        .padding(24).frame(width: 510)
+        .task {
+            do {
+                path = try await output("path")
+                command = try await output("command")
+            } catch { status = error.localizedDescription }
+        }
+        .alert(language("Остановить SSH-сокет?", "Stop this SSH control socket?"), isPresented: $confirmStop) {
+            Button(language("Отмена", "Cancel"), role: .cancel) {}
+            Button(language("Остановить", "Stop"), role: .destructive) { control("close") }
+        } message: {
+            Text(language("Сеансы, использующие этот сокет, будут закрыты.", "Sessions using this socket will disconnect."))
+        }
     }
 }
 
@@ -634,6 +789,23 @@ struct Editor: View {
             TextField(language("Relay по умолчанию", "Default relay"), text: $relay)
             SecureField(language("Заменить токен (пусто — оставить текущий)", "Replace token (leave blank to keep it)"), text: $token)
             Link(language.whatsNew, destination: AppLanguage.releaseNotes)
+            HStack {
+                Button(language("Проверить обновления", "Check for updates")) {
+                    Task { await workspace.checkUpdates() }
+                }.disabled(workspace.checkingUpdate)
+                if let update = workspace.update, update.available {
+                    Button(language("Обновить…", "Update…")) { workspace.offerUpdate(language) }
+                }
+            }
+            if workspace.checkingUpdate {
+                Text(language("Проверяем GitHub Releases…", "Checking GitHub Releases…"))
+            } else if let message = workspace.updateError {
+                Text(message).foregroundColor(.red).textSelection(.enabled)
+            } else if let update = workspace.update {
+                Text(update.available
+                     ? language("Установлена версия \(update.current). Доступна \(update.latest).", "Version \(update.current) is installed. Version \(update.latest) is available.")
+                     : language("Установлена актуальная версия \(update.current).", "Version \(update.current) is up to date."))
+            }
         case .key:
             HStack {
                 TextField(language("Публичный SSH-ключ", "Public SSH key"), text: $path)

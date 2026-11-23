@@ -49,9 +49,30 @@ jobs:
       - run: docker buildx build --file packaging/Dockerfile --build-arg SSHI_TARGETS="${{ matrix.target }}" --output type=local,dest=dist .
       - run: |
           sudo apt-get update
-          sudo apt-get install -y rpm rpm2cpio
+          sudo apt-get install -y rpm rpm2cpio zstd
           if [ "${{ matrix.arch }}" != armhf ]; then sh packaging/build-rpm.sh dist/*.deb; fi
           python3 packaging/check-release.py --source --dist dist
+      - name: Build and test the Arch Linux package
+        if: matrix.arch == 'amd64'
+        run: |
+          # Official archlinux:base-devel-20261108.0.623074
+          docker run --rm --network none \
+            --mount "type=bind,source=$PWD/packaging/build-arch.sh,target=/build-arch.sh,readonly" \
+            --mount "type=bind,source=$PWD/dist,target=/dist" \
+            archlinux@sha256:fa2d4ce3310ddd90a4208e5168be8ad367da5129af1245f38fd2d803bcbe3239 bash -euc '
+              useradd -m builder
+              runuser -u builder -- bash /build-arch.sh /dist/*_amd64.deb /tmp/packages
+              pkg=(/tmp/packages/*.pkg.tar.zst)
+              pacman --noconfirm -Udd "${pkg[0]}"
+              test "$(sshi --version)" = "sshi $(pacman -Q sshi | cut -d" " -f2 | cut -d- -f1)"
+              test -x /usr/bin/sshi-desktop
+              test -f /usr/lib/systemd/user/sshi.service
+              echo "# preserved by pacman" >> /etc/sshi/config.toml
+              pacman --noconfirm -Udd "${pkg[0]}"
+              grep -Fxq "# preserved by pacman" /etc/sshi/config.toml
+              install -m644 "${pkg[0]}" /dist/
+            '
+          python3 packaging/check-release.py --dist dist
       - if: matrix.arch == 'amd64'
         run: |
           rustup toolchain install 1.96.0 --profile minimal
@@ -164,10 +185,11 @@ jobs:
           fi
           if [ "$GITHUB_REF_TYPE" = tag ]; then test "$GITHUB_REF_NAME" = "$tag"; fi
           ( cd dist && sha256sum * > SHA256SUMS )
-          sudo apt-get update && sudo apt-get install -y rpm2cpio
+          sudo apt-get update && sudo apt-get install -y rpm2cpio zstd
           python3 packaging/check-release.py --source --dist dist
           for arch in amd64 arm64 armhf; do test -s "dist/sshi_${version}_${arch}.deb"; done
           for arch in x86_64 aarch64; do test -s "dist/sshi-$version-1.$arch.rpm"; done
+          test -s "dist/sshi-$version-1-x86_64.pkg.tar.zst"
           test -s "dist/sshi-$version-windows-x64.exe"
           test -s "dist/sshi-$version-macos-arm64.pkg"
           gh release create "$tag" --target "$GITHUB_SHA" --title "SSHI $version" --notes-file docs/release.md dist/*

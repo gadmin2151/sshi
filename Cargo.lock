@@ -1723,17 +1723,21 @@ dependencies = [
 
 [[package]]
 name = "iroh-ssh"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "blake3",
  "clap",
  "embed-resource",
  "iroh",
+ "libc",
  "percent-encoding",
  "rand",
+ "reqwest",
  "rpassword",
  "russh",
+ "rustls",
+ "semver",
  "serde",
  "serde_json",
  "tempfile",

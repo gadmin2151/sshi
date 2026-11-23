@@ -49,7 +49,7 @@ struct TestProfileClicks {
         precondition(AppLanguage.current(in: defaults) == .russian)
         defaults.set("en", forKey: AppLanguage.preferenceKey)
         let restored = AppLanguage.current(in: UserDefaults(suiteName: suite)!)
-        precondition(restored == .english && restored.whatsNew == "What’s new in 0.2.2")
+        precondition(restored == .english && restored.whatsNew == "What’s new in 0.2.3")
         precondition(ForwardKind.remote.title(restored) == "Access from there")
         precondition(AppLanguage.russian.commandError("Error: duplicate connection name 'old'").contains("уже существует"))
         precondition(restored.commandError("Error: invalid SSH username").contains("Check the SSH username"))
@@ -132,7 +132,40 @@ struct TestProfileClicks {
     }
 
     @MainActor
+    static func testSocketAndUpdates() async throws {
+        let profiles = try JSONDecoder().decode([Profile].self, from: Client.run(["profile", "list", "--json"]))
+        let selected = profiles.first { $0.name == "Second" }!
+        let path = String(decoding: try Client.run(selected.socket("path")), as: UTF8.self).trimmingCharacters(in: .newlines)
+        let command = String(decoding: try Client.run(selected.socket("command")), as: UTF8.self)
+        precondition(path.hasPrefix("/tmp/") && path.hasSuffix(".sock"))
+        precondition(command.contains(path) && command.contains("ProxyCommand=false") && command.contains(selected.destination))
+        precondition(!FileManager.default.fileExists(atPath: path), "opening the socket sheet must be offline")
+        for op in ["start", "check", "close"] {
+            precondition(selected.socket(op) == ["socket", op, "--", "Second"])
+        }
+        let workspace = Workspace()
+        let release = """
+        {"current":"1.0.0","latest":"1.0.1","available":true,"release_url":"https://github.com/gadmin2151/sshi/releases/tag/v1.0.1","download_url":null}
+        """
+        await workspace.checkUpdates {
+            try JSONDecoder().decode(ReleaseUpdate.self, from: Data(release.utf8))
+        }
+        precondition(workspace.update?.available == true && workspace.update?.latest == "1.0.1")
+        precondition(workspace.update?.download_url == nil && !workspace.checkingUpdate)
+        await workspace.checkUpdates { throw ClientError(message: "offline") }
+        precondition(workspace.updateError == "offline" && workspace.update?.available == true)
+        await workspace.checkUpdates {
+            let current = release.replacingOccurrences(of: "\"available\":true", with: "\"available\":false")
+                                 .replacingOccurrences(of: "1.0.1", with: "1.0.0")
+            return try JSONDecoder().decode(ReleaseUpdate.self, from: Data(current.utf8))
+        }
+        precondition(workspace.update?.available == false && workspace.updateError == nil)
+        print("Offline socket preview, profile arguments and update notification states passed")
+    }
+
+    @MainActor
     static func main() async throws {
+        try await testSocketAndUpdates()
         try await testInvitations()
         try runWindowTests()
     }

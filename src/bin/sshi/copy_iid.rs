@@ -59,7 +59,8 @@ pub fn run(copy: CopyIid) -> Result<()> {
                 copy.port.is_none(),
                 "-p is only for direct SSH destinations"
             );
-            let mut ssh = ssh_over_iroh(destination.endpoint, &quoted_sshi_executable()?, None);
+            let mut ssh =
+                ssh_over_iroh(destination.endpoint, &quoted_sshi_executable()?, None, None);
             ssh.arg("-l").arg(destination.user);
             (ssh, destination.endpoint.to_string())
         }

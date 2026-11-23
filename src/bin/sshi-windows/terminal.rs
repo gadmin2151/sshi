@@ -1,3 +1,4 @@
+use crate::lang::{tr, tr_format};
 use std::{
     env,
     io::{self, Write},
@@ -49,7 +50,10 @@ pub enum RelayAction {
 
 pub fn open_window(title: &str) -> Result<()> {
     if unsafe { AllocConsole() } == 0 {
-        return Err(last_error()).context("Открыть окно терминала Windows");
+        return Err(last_error()).context(tr(
+            "Открыть окно терминала Windows",
+            "Open a Windows terminal",
+        ));
     }
     let title = wide(format!("sshi — {title}"));
     unsafe {
@@ -73,7 +77,7 @@ pub fn open_command_window() -> Result<bool> {
     if unsafe { AttachConsole(ATTACH_PARENT_PROCESS) } != 0 {
         return Ok(false);
     }
-    open_window("Команды")?;
+    open_window(tr("Команды", "Commands"))?;
     Ok(true)
 }
 
@@ -85,8 +89,14 @@ pub async fn connect(
 ) -> Result<()> {
     let route = relay_route(&profile)?;
     eprintln!(
-        "Подключение к {}@{} через {}",
-        profile.user, profile.endpoint, route.relay
+        "{}",
+        tr_format!(
+            "Подключение к {}@{} через {}",
+            "Connecting to {}@{} through {}",
+            profile.user,
+            profile.endpoint,
+            route.relay
+        )
     );
     let outcome = async {
         let stream = broker::connect(&store, &route, profile.endpoint).await?;
@@ -101,12 +111,21 @@ pub async fn connect(
         };
         let mut ssh = client::connect_stream(Arc::new(config), stream, handler)
             .await
-            .context("Установить SSH-соединение")?;
+            .context(tr(
+                "Установить SSH-соединение",
+                "Establish the SSH connection",
+            ))?;
         let result = match action {
             RelayAction::Shell => {
                 authenticate(&mut ssh, &store, &profile, interactive, None).await?;
                 if let Err(error) = store.record_connection(&profile) {
-                    eprintln!("Сохранить историю подключений: {error:#}");
+                    eprintln!(
+                        "{}",
+                        tr_format!(
+                            "Сохранить историю подключений: {error:#}",
+                            "Save connection history: {error:#}"
+                        )
+                    );
                 }
                 shell(&ssh, interactive).await.map(|()| None)
             }
@@ -133,7 +152,10 @@ pub async fn connect(
                 if let Err(error) =
                     window::show_invitation(unsafe { GetConsoleWindow() }, &code.to_string())
                 {
-                    println!("Код приглашения\n{code}");
+                    println!(
+                        "{}",
+                        tr_format!("Код приглашения\n{code}", "Invitation code\n{code}")
+                    );
                     return Err(error);
                 }
             } else {
@@ -145,14 +167,15 @@ pub async fn connect(
     .await;
     outcome.map_err(|error: anyhow::Error| {
         if let Some(denied) = error.downcast_ref::<tunnel::ClientNotAllowed>() {
-            anyhow::anyhow!(
+            anyhow::anyhow!(tr_format!(
                 "Получатель отклонил Endpoint ID этого клиента Windows\n{}\n\n\
                  Передайте этот ID администратору. С кодом приглашения нажмите «Ввести приглашение». \
                  При ручной настройке добавьте ID в allow_clients в /etc/sshi/config.toml. \
                  На старых версиях перезапустите службу пользователя, который обслуживает этот Endpoint ID. \
                  В Docker Compose используется IROH_SSH_CLIENT_ID.",
+                "The receiver rejected this Windows client’s endpoint ID\n{}\n\nGive this ID to the administrator. If you have an invitation, choose “Redeem invitation”. For manual setup, add the ID to allow_clients in /etc/sshi/config.toml. Older versions require restarting the receiving user’s service. Docker Compose uses IROH_SSH_CLIENT_ID.",
                 denied.client
-            )
+            ))
         } else {
             error
         }
@@ -161,27 +184,58 @@ pub async fn connect(
 
 pub async fn enroll(store: Store, profile: Profile, interactive: bool) -> Result<()> {
     let id = store.identity()?.public();
-    eprintln!("Разрешение Endpoint ID {id} на «{}»", profile.name);
+    eprintln!(
+        "{}",
+        tr_format!(
+            "Разрешение Endpoint ID {id} на «{}»",
+            "Authorizing endpoint ID {id} on “{}”",
+            profile.name
+        )
+    );
     let route = relay_route(&profile)?;
-    let code: Code = prompt("Код приглашения: ".into(), false, interactive)
-        .await?
-        .parse()
-        .context("Проверьте код приглашения")?;
+    let code: Code = prompt(
+        tr("Код приглашения: ", "Invitation code: ").into(),
+        false,
+        interactive,
+    )
+    .await?
+    .parse()
+    .context(tr("Проверьте код приглашения", "Check the invitation code"))?;
     broker::redeem(&store, &route, profile.endpoint, code)
         .await
-        .context("Принять приглашение через Iroh relay")?;
-    println!("Этот компьютер разрешён. Теперь можно подключиться через iroh.");
+        .context(tr(
+            "Принять приглашение через Iroh relay",
+            "Redeem the invitation through the Iroh relay",
+        ))?;
+    println!(
+        "{}",
+        tr(
+            "Этот компьютер разрешён. Теперь можно подключиться через iroh.",
+            "This computer is authorized. You can now connect through Iroh."
+        )
+    );
     Ok(())
 }
 
 pub async fn issue_invite(store: Store, profile: Profile, interactive: bool) -> Result<()> {
-    let client = prompt("Endpoint ID нового ПК: ".into(), true, interactive)
-        .await?
-        .trim()
-        .parse()
-        .context("Проверьте Endpoint ID нового ПК")?;
+    let client = prompt(
+        tr("Endpoint ID нового ПК: ", "New computer endpoint ID: ").into(),
+        true,
+        interactive,
+    )
+    .await?
+    .trim()
+    .parse()
+    .context(tr(
+        "Проверьте Endpoint ID нового ПК",
+        "Check the new computer’s endpoint ID",
+    ))?;
     let account = prompt(
-        format!("Пользователь службы sshi [{}]: ", profile.user),
+        tr_format!(
+            "Пользователь службы sshi [{}]: ",
+            "SSHI service user [{}]: ",
+            profile.user
+        ),
         true,
         interactive,
     )
@@ -192,7 +246,10 @@ pub async fn issue_invite(store: Store, profile: Profile, interactive: bool) -> 
             && !account
                 .chars()
                 .any(|ch| ch.is_control() || ch.is_whitespace()),
-        "Укажите одного пользователя службы sshi"
+        tr(
+            "Укажите одного пользователя службы sshi",
+            "Enter one SSHI service user"
+        )
     );
     let service_user = (!account.is_empty() && account != profile.user).then(|| account.to_owned());
     connect(
@@ -221,19 +278,22 @@ async fn request_invitation(
         } else {
             ensure!(
                 stdout.len() + data.len() <= 4096,
-                "Слишком длинный ответ получателя"
+                tr(
+                    "Слишком длинный ответ получателя",
+                    "Receiver response is too long"
+                )
             );
             stdout.extend_from_slice(data);
         }
         Ok(())
     })
     .await
-    .context("Создать приглашение")?;
+    .context(tr("Создать приглашение", "Create an invitation"))?;
 
-    std::str::from_utf8(&stdout)?
-        .trim()
-        .parse()
-        .context("Проверить код приглашения")
+    std::str::from_utf8(&stdout)?.trim().parse().context(tr(
+        "Проверить код приглашения",
+        "Validate the invitation code",
+    ))
 }
 
 pub fn default_relay() -> Result<String> {
@@ -241,11 +301,12 @@ pub fn default_relay() -> Result<String> {
 }
 
 fn relay_route(profile: &Profile) -> Result<Route> {
-    let default = relay_url(&default_relay()?).context("Проверьте IROH_RELAY_URL")?;
+    let default = relay_url(&default_relay()?)
+        .context(tr("Проверьте IROH_RELAY_URL", "Check IROH_RELAY_URL"))?;
     let relay = if profile.relay.is_empty() {
         default.clone()
     } else {
-        relay_url(&profile.relay).context("Адрес iroh relay")?
+        relay_url(&profile.relay).context(tr("Адрес iroh relay", "Iroh relay address"))?
     };
     let token = if !profile.relay_token.is_empty() {
         Some(String::from_utf8(crypt(&profile.relay_token, false)?)?)
@@ -268,45 +329,36 @@ pub async fn proxy(store: &Store, profile: &Profile) -> Result<()> {
     tunnel::proxy_stdio(read, write).await
 }
 
-pub fn forward(profile: &Profile) -> Result<()> {
-    let system = env::var_os("SystemRoot").context("Не удалось определить папку Windows")?;
+pub fn forward(profile: &Profile, args: &[std::ffi::OsString]) -> Result<()> {
+    ensure!(
+        matches!(args, [flag, _rule] if matches!(flag.to_str(), Some("-L" | "-R" | "-D"))),
+        "Invalid forwarding parameters"
+    );
+    let system = env::var_os("SystemRoot").context(tr(
+        "Не удалось определить папку Windows",
+        "Could not find the Windows directory",
+    ))?;
     let ssh = PathBuf::from(system).join("System32/OpenSSH/ssh.exe");
     ensure!(
         ssh.is_file(),
-        "Для проброса портов установите дополнительный компонент Windows «Клиент OpenSSH»."
+        tr(
+            "Для проброса портов установите дополнительный компонент Windows «Клиент OpenSSH».",
+            "Install the Windows OpenSSH Client optional feature to forward ports."
+        )
     );
-    eprintln!("Проброс портов через {}@{}", profile.user, profile.endpoint);
     eprintln!(
-        "-L   порт этого ПК → адрес на стороне сервера\n-R   порт на сервере → адрес на стороне этого ПК\n-D   локальный SOCKS-прокси"
-    );
-    let mut input = String::new();
-    eprint!("Режим [-L]: ");
-    io::stderr().flush()?;
-    ensure!(io::stdin().read_line(&mut input)? > 0, "Ввод прерван");
-    let flag = match input.trim().to_ascii_uppercase().as_str() {
-        "" | "-L" | "L" => "-L",
-        "-R" | "R" => "-R",
-        "-D" | "D" => "-D",
-        _ => bail!("Доступные режимы: -L, -R, -D"),
-    };
-    let example = if flag == "-D" {
-        "127.0.0.1:1080"
-    } else {
-        "127.0.0.1:8080:127.0.0.1:80"
-    };
-    eprint!("Правило (например {example}): ");
-    io::stderr().flush()?;
-    input.clear();
-    ensure!(io::stdin().read_line(&mut input)? > 0, "Ввод прерван");
-    let rule = input.trim();
-    ensure!(
-        !rule.is_empty() && !rule.chars().any(char::is_control),
-        "Укажите правило проброса"
+        "{}",
+        tr_format!(
+            "Проброс портов через {}@{}",
+            "Port forwarding through {}@{}",
+            profile.user,
+            profile.endpoint
+        )
     );
     let executable = env::current_exe()?;
     let path = executable
         .to_str()
-        .context("Некорректный путь к программе")?;
+        .context(tr("Некорректный путь к программе", "Invalid program path"))?;
     // OpenSSH expands percent tokens before Win32 starts the proxy process.
     // Only the program path and a fixed switch enter this command string.
     let path = path
@@ -321,22 +373,37 @@ pub fn forward(profile: &Profile) -> Result<()> {
     if !profile.ssh_key.is_empty() {
         command.arg("-i").arg(&profile.ssh_key);
     }
-    eprintln!("Запускается Windows OpenSSH. Для остановки нажмите Ctrl+C.");
+    eprintln!(
+        "{}",
+        tr(
+            "Запускается Windows OpenSSH. Для остановки нажмите Ctrl+C.",
+            "Starting Windows OpenSSH. Press Ctrl+C to stop the tunnel."
+        )
+    );
     let status = command
-        .arg(flag)
-        .arg(rule)
+        .args(args)
         .arg("--")
         .arg(format!("{}@{}", profile.user, profile.endpoint))
         .status()
-        .context("Запустить Windows OpenSSH")?;
-    ensure!(status.success(), "OpenSSH завершился с кодом {status}");
+        .context(tr("Запустить Windows OpenSSH", "Start Windows OpenSSH"))?;
+    ensure!(
+        status.success(),
+        "{}",
+        tr_format!(
+            "OpenSSH завершился с кодом {status}",
+            "OpenSSH exited with status {status}"
+        )
+    );
     Ok(())
 }
 
 async fn copy_endpoint_id(ssh: &client::Handle<VerifyHost>, id: EndpointId) -> Result<()> {
     run_remote(ssh, allow_client_command(id), None)
         .await
-        .context("Записать Endpoint ID на получателе. Проверьте версию sshi и права учётной записи")
+        .context(tr(
+            "Записать Endpoint ID на получателе. Проверьте версию sshi и права учётной записи",
+            "Save the endpoint ID on the receiver. Check the SSHI version and account permissions",
+        ))
 }
 
 async fn copy_ssh_key(
@@ -356,10 +423,17 @@ async fn copy_ssh_key(
     authenticate(ssh, store, profile, interactive, Some(private)).await?;
     run_remote(ssh, install_ssh_key_command(), Some(line.into_bytes()))
         .await
-        .context("Добавить SSH-ключ в ~/.ssh/authorized_keys на получателе")?;
+        .context(tr(
+            "Добавить SSH-ключ в ~/.ssh/authorized_keys на получателе",
+            "Add the SSH key to ~/.ssh/authorized_keys on the receiver",
+        ))?;
     println!(
-        "Публичный SSH-ключ установлен для пользователя {}.",
-        profile.user
+        "{}",
+        tr_format!(
+            "Публичный SSH-ключ установлен для пользователя {}.",
+            "The public SSH key was installed for user {}.",
+            profile.user
+        )
     );
     Ok(())
 }
@@ -391,15 +465,25 @@ async fn exec_remote(
             ChannelMsg::Data { data } => output(&data, false)?,
             ChannelMsg::ExtendedData { data, .. } => output(&data, true)?,
             ChannelMsg::ExitStatus { exit_status } => exit = Some(exit_status),
-            ChannelMsg::Failure => bail!("Сервер отклонил удалённую команду"),
+            ChannelMsg::Failure => bail!(tr(
+                "Сервер отклонил удалённую команду",
+                "The server rejected the remote command"
+            )),
             ChannelMsg::Close => break,
             _ => {}
         }
     }
-    let status = exit.context("Сервер закрыл канал без кода завершения")?;
+    let status = exit.context(tr(
+        "Сервер закрыл канал без кода завершения",
+        "The server closed the channel without an exit status",
+    ))?;
     ensure!(
         status == 0,
-        "Удалённая команда завершилась с кодом {status}"
+        "{}",
+        tr_format!(
+            "Удалённая команда завершилась с кодом {status}",
+            "The remote command exited with status {status}"
+        )
     );
     Ok(())
 }
@@ -418,12 +502,16 @@ impl client::Handler for VerifyHost {
         if let Some(saved) = self.store.host_fingerprint(self.endpoint)? {
             ensure!(
                 saved == fingerprint,
-                "Ключ SSH-сервера изменился. Ожидался {saved}, получен {fingerprint}"
+                "{}",
+                tr_format!(
+                    "Ключ SSH-сервера изменился. Ожидался {saved}, получен {fingerprint}",
+                    "The SSH host key changed. Expected {saved}, received {fingerprint}"
+                )
             );
             return Ok(true);
         }
         let accepted = prompt(
-            format!("Первое подключение. Сверьте отпечаток SSH-сервера: {fingerprint}\nДоверять этому ключу? Введите yes или no: "),
+            tr_format!("Первое подключение. Сверьте отпечаток SSH-сервера: {fingerprint}\nДоверять этому ключу? Введите yes или no: ", "First connection. Verify the SSH host key fingerprint: {fingerprint}\nTrust this key? Enter yes or no: "),
             true,
             self.interactive,
         ).await?;
@@ -468,7 +556,12 @@ async fn authenticate(
         }
     }
     if supports_method(&result, MethodKind::Password) {
-        let password = prompt(format!("Пароль {user}: "), false, interactive).await?;
+        let password = prompt(
+            tr_format!("Пароль {user}: ", "Password for {user}: "),
+            false,
+            interactive,
+        )
+        .await?;
         result = ssh.authenticate_password(user, password).await?;
         if result.success() {
             return Ok(());
@@ -504,18 +597,29 @@ async fn authenticate(
             }
         }
     }
-    bail!("Сервер отклонил вход для {user}. Проверьте логин и SSH-ключ или пароль")
+    bail!(
+        "{}",
+        tr_format!(
+            "Сервер отклонил вход для {user}. Проверьте логин и SSH-ключ или пароль",
+            "The server rejected the login for {user}. Check your username and SSH key or password"
+        )
+    )
 }
 
 async fn load_key(path: &str, interactive: bool) -> Result<PrivateKey> {
     match keys::load_secret_key(path, None) {
         Err(keys::Error::KeyIsEncrypted) => {
-            let passphrase = prompt("Фраза-пароль SSH-ключа: ".into(), false, interactive).await?;
+            let passphrase = prompt(
+                tr("Фраза-пароль SSH-ключа: ", "SSH key passphrase: ").into(),
+                false,
+                interactive,
+            )
+            .await?;
             keys::load_secret_key(path, Some(&passphrase))
         }
         result => result,
     }
-    .context("Открыть SSH-ключ")
+    .context(tr("Открыть SSH-ключ", "Open the SSH key"))
 }
 
 fn supports_method(result: &AuthResult, kind: MethodKind) -> bool {
@@ -543,11 +647,14 @@ async fn prompt(message: String, echo: bool, interactive: bool) -> Result<String
         if !echo {
             eprintln!();
         }
-        ensure!(count > 0, "Ввод прерван");
+        ensure!(count > 0, tr("Ввод прерван", "Input was interrupted"));
         Ok(value.trim_end_matches(['\r', '\n']).to_owned())
     })
     .await
-    .context("Прочитать ответ в терминале")?
+    .context(tr(
+        "Прочитать ответ в терминале",
+        "Read the terminal response",
+    ))?
 }
 
 async fn shell(ssh: &client::Handle<VerifyHost>, interactive: bool) -> Result<()> {
@@ -558,10 +665,16 @@ async fn shell(ssh: &client::Handle<VerifyHost>, interactive: bool) -> Result<()
         .await?;
     let reply = time::timeout(Duration::from_secs(15), channel.wait())
         .await
-        .context("Сервер не ответил на запрос терминала")?;
+        .context(tr(
+            "Сервер не ответил на запрос терминала",
+            "The server did not answer the terminal request",
+        ))?;
     ensure!(
         matches!(reply, Some(ChannelMsg::Success)),
-        "Сервер отклонил выделение SSH-терминала"
+        tr(
+            "Сервер отклонил выделение SSH-терминала",
+            "The server rejected the SSH terminal request"
+        )
     );
     channel.request_shell(true).await?;
 
@@ -593,7 +706,7 @@ async fn shell(ssh: &client::Handle<VerifyHost>, interactive: bool) -> Result<()
             event = channel.wait() => match event {
                 Some(ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. }) => output.write(&data)?,
                 Some(ChannelMsg::ExitStatus { exit_status }) => exit = Some(exit_status),
-                Some(ChannelMsg::Failure) => bail!("Сервер отклонил запрос оболочки"),
+                Some(ChannelMsg::Failure) => bail!(tr("Сервер отклонил запрос оболочки", "The server rejected the shell request")),
                 Some(ChannelMsg::Close) | None => break,
                 _ => {}
             },
@@ -612,8 +725,12 @@ async fn shell(ssh: &client::Handle<VerifyHost>, interactive: bool) -> Result<()
     }
     ensure!(
         exit.unwrap_or(0) == 0,
-        "Удалённая оболочка завершилась с кодом {}",
-        exit.unwrap_or(0)
+        "{}",
+        tr_format!(
+            "Удалённая оболочка завершилась с кодом {}",
+            "The remote shell exited with status {}",
+            exit.unwrap_or(0)
+        )
     );
     Ok(())
 }
@@ -638,7 +755,10 @@ impl ConsoleMode {
         if unsafe { GetConsoleMode(handle, &mut original) } == 0
             || unsafe { SetConsoleMode(handle, (original & !clear) | set) } == 0
         {
-            return Err(last_error()).context("Настроить терминал Windows");
+            return Err(last_error()).context(tr(
+                "Настроить терминал Windows",
+                "Configure the Windows terminal",
+            ));
         }
         Ok(Self(handle, original))
     }

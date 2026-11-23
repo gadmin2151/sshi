@@ -1,3 +1,4 @@
+use crate::lang::{tr, tr_format};
 use std::{
     ffi::{OsStr, OsString},
     path::{Path, PathBuf},
@@ -86,7 +87,7 @@ pub fn run(arguments: &[OsString]) -> i32 {
         Ok(cli) => match execute(cli, terminal::has_console_input()) {
             Ok(()) => 0,
             Err(error) => {
-                eprintln!("Ошибка: {error:#}");
+                eprintln!("{}", tr_format!("Ошибка: {error:#}", "Error: {error:#}"));
                 1
             }
         },
@@ -96,7 +97,13 @@ pub fn run(arguments: &[OsString]) -> i32 {
         }
     };
     if own_window {
-        eprintln!("Нажмите Enter, чтобы закрыть терминал.");
+        eprintln!(
+            "{}",
+            tr(
+                "Нажмите Enter, чтобы закрыть терминал.",
+                "Press Enter to close the terminal."
+            )
+        );
         let _ = std::io::stdin().read_line(&mut String::new());
     }
     status
@@ -131,11 +138,18 @@ fn execute(cli: Cli, interactive: bool) -> Result<()> {
         }
         Operation::Backup { file } => return store.backup(&file),
         Operation::Restore { file } => {
-            let _writer = store
-                .lock("window.lock", true)
-                .context("Импортируйте файл через открытое окно sshi или закройте его")?;
+            let _writer = store.lock("window.lock", true).context(tr(
+                "Импортируйте файл через открытое окно sshi или закройте его",
+                "Import through the open SSHI window or close it first",
+            ))?;
             let count = store.restore(&file)?;
-            println!("Добавлено подключений: {count}");
+            println!(
+                "{}",
+                tr_format!(
+                    "Добавлено подключений: {count}",
+                    "Connections added: {count}"
+                )
+            );
             return Ok(());
         }
         Operation::CopyId(target) => (target, RelayAction::CopySshKey),
@@ -176,15 +190,20 @@ fn profile(store: &Store, target: Target) -> Result<Profile> {
 }
 
 fn from_destination(destination: &str, profiles: Vec<Profile>) -> Result<Profile> {
-    let (user, endpoint) = iroh_ssh::profiles::destination(destination)
-        .context("Укажите имя подключения или пользователь@Endpoint_ID")?;
+    let (user, endpoint) = iroh_ssh::profiles::destination(destination).context(tr(
+        "Укажите имя подключения или пользователь@Endpoint_ID",
+        "Enter a connection name or user@Endpoint_ID",
+    ))?;
     let mut matches = profiles
         .into_iter()
         .filter(|profile| profile.endpoint == endpoint && profile.user == user);
     if let Some(saved) = matches.next() {
         ensure!(
             matches.next().is_none(),
-            "Для этого адреса есть несколько профилей. Укажите имя подключения."
+            tr(
+                "Для этого адреса есть несколько профилей. Укажите имя подключения.",
+                "Multiple profiles use this address. Enter the connection name."
+            )
         );
         return Ok(saved);
     }

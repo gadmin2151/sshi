@@ -1,3 +1,4 @@
+pub mod forwarding;
 mod identity;
 pub mod invite;
 pub mod local;

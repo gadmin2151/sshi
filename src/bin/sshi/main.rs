@@ -20,6 +20,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use clap::{ArgAction, Parser, Subcommand};
 use iroh::EndpointId;
+use iroh_ssh::forwarding::{ForwardKind, ForwardSpec};
 use iroh_ssh::{run_async, ssh_target};
 
 use crate::{config::Config, state::State};
@@ -88,6 +89,21 @@ enum Action {
         name: String,
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<OsString>,
+    },
+    /// Forward a TCP port or start a local SOCKS proxy using a saved connection.
+    Forward {
+        #[arg(long, allow_hyphen_values = true)]
+        profile: String,
+        #[arg(long, value_enum)]
+        kind: ForwardKind,
+        #[arg(long, default_value = "127.0.0.1")]
+        bind_host: String,
+        #[arg(long)]
+        bind_port: String,
+        #[arg(long, requires = "target_port")]
+        target_host: Option<String>,
+        #[arg(long, requires = "target_host")]
+        target_port: Option<String>,
     },
     /// Export all profiles and connection history to a new JSON file.
     Backup { file: PathBuf },
@@ -184,6 +200,35 @@ fn main() -> Result<()> {
         Some(Action::List) => State::load()?.list(),
         Some(Action::Profile { command }) => profiles::run(command),
         Some(Action::Connect { name, command }) => profiles::connect(&name, command),
+        Some(Action::Forward {
+            profile,
+            kind,
+            bind_host,
+            bind_port,
+            target_host,
+            target_port,
+        }) => {
+            if kind == ForwardKind::Dynamic && target_host.is_some() {
+                bail!(
+                    "a SOCKS proxy takes its destination from the application; omit the target fields"
+                );
+            }
+            let spec = ForwardSpec::new(
+                kind,
+                &bind_host,
+                &bind_port,
+                target_host.as_deref().unwrap_or_default(),
+                target_port.as_deref().unwrap_or_default(),
+            )?;
+            let p = profiles::lookup(&profile)?;
+            Err(profiles::command(&p)?
+                .arg("-N")
+                .args(spec.ssh_args())
+                .arg("--")
+                .arg(p.destination())
+                .exec())
+            .context("start port forwarding")
+        }
         Some(Action::Backup { file }) => State::load()?.snapshot()?.write(&file),
         Some(Action::Restore { file }) => {
             let backup = iroh_ssh::profiles::Backup::read(&file)?;

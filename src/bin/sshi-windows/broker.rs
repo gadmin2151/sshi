@@ -1,3 +1,4 @@
+use crate::lang::{tr, tr_format};
 use std::{
     env, fs,
     io::{self, Read, Write},
@@ -87,12 +88,18 @@ async fn open_local(store: &Store, route: &Route) -> Result<(TcpStream, [u8; 32]
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .context("Запустить общий туннель iroh")?;
+        .context(tr(
+            "Запустить общий туннель iroh",
+            "Start the shared Iroh tunnel",
+        ))?;
     let settings = toml::to_string(route)?;
     process
         .stdin
         .take()
-        .context("Передать настройки общему туннелю iroh")?
+        .context(tr(
+            "Передать настройки общему туннелю iroh",
+            "Send settings to the shared Iroh tunnel",
+        ))?
         .write_all(settings.as_bytes())?;
 
     timeout(local::START_TIMEOUT, async {
@@ -101,29 +108,48 @@ async fn open_local(store: &Store, route: &Route) -> Result<(TcpStream, [u8; 32]
                 return Ok(connection);
             }
             if let Some(status) = process.try_wait()? {
-                bail!("Процесс общего туннеля iroh завершился с кодом {status}");
+                bail!(
+                    "{}",
+                    tr_format!(
+                        "Процесс общего туннеля iroh завершился с кодом {status}",
+                        "The shared Iroh tunnel exited with status {status}"
+                    )
+                );
             }
             sleep(Duration::from_millis(25)).await;
         }
     })
     .await
-    .context("Истекло время запуска общего туннеля iroh")?
+    .context(tr(
+        "Истекло время запуска общего туннеля iroh",
+        "The shared Iroh tunnel timed out during startup",
+    ))?
 }
 
 async fn running_broker(store: &Store, route: &Route) -> Result<Option<(TcpStream, [u8; 32])>> {
     let encrypted = match fs::read(store.path().join(LOCATION)) {
         Ok(data) => data,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error).context("Открыть данные локального туннеля"),
+        Err(error) => {
+            return Err(error).context(tr(
+                "Открыть данные локального туннеля",
+                "Open local tunnel state",
+            ));
+        }
     };
-    let location: BrokerLocation = toml::from_slice(&crypt(&encrypted, false)?)
-        .context("Прочитать данные локального туннеля")?;
+    let location: BrokerLocation = toml::from_slice(&crypt(&encrypted, false)?).context(tr(
+        "Прочитать данные локального туннеля",
+        "Read local tunnel state",
+    ))?;
     let Ok(stream) = TcpStream::connect((Ipv4Addr::LOCALHOST, location.port)).await else {
         return Ok(None);
     };
     ensure!(
         location.route == *route,
-        "Общий туннель уже использует другой relay или токен. Закройте его окна перед сменой настроек."
+        tr(
+            "Общий туннель уже использует другой relay или токен. Закройте его окна перед сменой настроек.",
+            "The shared tunnel is using a different relay or token. Close its windows before changing these settings."
+        )
     );
     Ok(Some((stream, location.capability)))
 }

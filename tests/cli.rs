@@ -194,6 +194,105 @@ fn backup_restores_named_connections_and_legacy_history_without_identity_files()
 }
 
 #[test]
+fn rename_changes_only_the_profile_name_and_rejects_conflicts_atomically() -> Result<()> {
+    let f = Fixture::new()?;
+    let id = SecretKey::generate().public().to_string();
+    for name in ["Office", "Studio"] {
+        f.run(&[
+            "profile",
+            "save",
+            "--name",
+            name,
+            "--user",
+            "operator",
+            "--endpoint",
+            &id,
+            "--relay",
+            "https://office.example/",
+        ])?;
+    }
+    let args = ["profile", "list", "--json"];
+    let mut expected = f.json(&args)?;
+    for invalid in ["sTUDIO", "", " trailing "] {
+        let out = f
+            .command()
+            .args(["profile", "rename", "--name", "office", "--to", invalid])
+            .output()?;
+        assert!(!out.status.success());
+        assert_eq!(f.json(&args)?, expected);
+    }
+    for (old, new) in [("Office", "OFFICE"), ("office", "-Рабочий ПК")] {
+        f.run(&["profile", "rename", "--name", old, "--to", new])?;
+        expected[0]["name"] = new.into();
+        assert_eq!(f.json(&args)?, expected);
+    }
+    Ok(())
+}
+
+#[test]
+fn gui_forward_uses_the_saved_route_and_native_ssh_arguments() -> Result<()> {
+    let f = Fixture::new()?;
+    let id = SecretKey::generate().public().to_string();
+    f.run(&[
+        "profile",
+        "save",
+        "--name",
+        "GUI profile",
+        "--user",
+        "operator",
+        "--endpoint",
+        &id,
+        "--relay",
+        "https://work.example/",
+    ])?;
+    let ssh = f.dir().join("ssh");
+    fs::write(
+        &ssh,
+        "#!/bin/sh\nprintf '%s\\n' \"$SSHI_PROFILE_RELAY_URL\" \"$@\"\n",
+    )?;
+    fs::set_permissions(ssh, fs::Permissions::from_mode(0o700))?;
+    for (kind, flag, rule) in [
+        ("local", "-L", "[::1]:8080:db.example:80"),
+        ("remote", "-R", "[::1]:8080:db.example:80"),
+        ("dynamic", "-D", "[::1]:8080"),
+    ] {
+        let mut cmd = f.command();
+        cmd.env("PATH", f.dir()).args([
+            "forward",
+            "--profile",
+            "GUI profile",
+            "--kind",
+            kind,
+            "--bind-host",
+            "::1",
+            "--bind-port",
+            "8080",
+        ]);
+        if kind != "dynamic" {
+            cmd.args(["--target-host", "db.example", "--target-port", "80"]);
+        }
+        let output = cmd.output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8(output.stdout)?;
+        let args: Vec<_> = stdout.lines().collect();
+        assert_eq!(args[0], "https://work.example/");
+        assert!(args.contains(&"ExitOnForwardFailure=yes"));
+        assert!(args.contains(&"-N"));
+        assert!(args.windows(2).any(|w| w == [flag, rule]));
+        assert!(args.ends_with(&["-l", "operator", "--", &id]));
+        assert!(
+            args.iter()
+                .any(|s| s.contains("ProxyCommand=") && s.contains("__proxy"))
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn simultaneous_profile_saves_and_key_install_are_idempotent() -> Result<()> {
     let f = Fixture::new()?;
     let id = SecretKey::generate().public().to_string();

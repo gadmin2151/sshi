@@ -5,6 +5,10 @@ mod broker;
 #[cfg(windows)]
 mod cli;
 #[cfg(windows)]
+mod forward_dialog;
+#[cfg(windows)]
+mod lang;
+#[cfg(windows)]
 mod store;
 #[cfg(windows)]
 mod terminal;
@@ -16,6 +20,7 @@ const SESSION_ENV: &str = "SSHI_WINDOWS_PROFILE";
 
 #[cfg(windows)]
 fn main() {
+    use crate::lang::{tr, tr_format};
     use std::{env, ptr::null_mut};
 
     use anyhow::{Context, Result};
@@ -40,7 +45,10 @@ fn main() {
     let mode = arguments.get(1).and_then(|value| value.to_str());
     let result: Result<()> = (|| match mode {
         Some("--forward-proxy") => {
-            let profile = toml::from_str(&env::var(SESSION_ENV).context("Профиль отсутствует")?)?;
+            let profile = toml::from_str(
+                &env::var(SESSION_ENV)
+                    .context(tr("Профиль отсутствует", "Missing connection profile"))?,
+            )?;
             let store = store::Store::open()?;
             iroh_ssh::run_async(terminal::proxy(&store, &profile))
         }
@@ -60,18 +68,25 @@ fn main() {
             let enrollment = matches!(mode, Some("--enroll" | "--enroll-io"));
             let install_key = matches!(mode, Some("--copy-ssh-key" | "--copy-ssh-key-io"));
             let issue_invite = matches!(mode, Some("--issue-invite" | "--issue-invite-io"));
-            let profile: store::Profile =
-                toml::from_str(&env::var(SESSION_ENV).context("Профиль отсутствует")?)?;
+            let profile: store::Profile = toml::from_str(
+                &env::var(SESSION_ENV)
+                    .context(tr("Профиль отсутствует", "Missing connection profile"))?,
+            )?;
+            let store = store::Store::open()?;
             if interactive {
                 if issue_invite {
-                    terminal::open_window(&format!("Создать приглашение — {}", profile.name))?;
+                    terminal::open_window(&tr_format!(
+                        "Создать приглашение — {}",
+                        "Create invitation — {}",
+                        profile.name
+                    ))?;
                 } else {
                     terminal::open_window(&profile.name)?;
                 }
             }
-            let result = store::Store::open().and_then(|store| {
+            let result = {
                 if matches!(mode, Some("--forward" | "--forward-io")) {
-                    terminal::forward(&profile)
+                    terminal::forward(&profile, &arguments[2..])
                 } else if enrollment {
                     iroh_ssh::run_async(terminal::enroll(store, profile, interactive))
                 } else if issue_invite {
@@ -84,12 +99,21 @@ fn main() {
                     };
                     iroh_ssh::run_async(terminal::connect(store, profile, interactive, action))
                 }
-            });
+            };
             if interactive && (enrollment || install_key || result.is_err()) {
                 if let Err(error) = &result {
-                    eprintln!("\nОшибка: {error:#}");
+                    eprintln!(
+                        "{}",
+                        tr_format!("\nОшибка: {error:#}", "\nError: {error:#}")
+                    );
                 }
-                eprintln!("Нажмите Enter, чтобы закрыть терминал.");
+                eprintln!(
+                    "{}",
+                    tr(
+                        "Нажмите Enter, чтобы закрыть терминал.",
+                        "Press Enter to close the terminal."
+                    )
+                );
                 let _ = std::io::stdin().read_line(&mut String::new());
             }
             result

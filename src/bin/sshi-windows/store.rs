@@ -1,3 +1,4 @@
+use crate::lang::{tr, tr_format};
 use std::{
     ffi::{OsStr, OsString},
     fs::{self, File, OpenOptions, TryLockError},
@@ -87,7 +88,11 @@ impl Store {
         };
         ensure!(
             status >= 0 && !documents.is_null(),
-            "Не удалось найти папку «Документы» (0x{status:08x})"
+            "{}",
+            tr_format!(
+                "Не удалось найти папку «Документы» (0x{status:08x})",
+                "Could not find the Documents folder (0x{status:08x})"
+            )
         );
         let path = unsafe {
             let mut len = 0;
@@ -99,15 +104,34 @@ impl Store {
             path
         };
         let dir = PathBuf::from(path).join(".sshi");
-        fs::create_dir_all(&dir).context("Создать папку «Документы»\\.sshi")?;
+        fs::create_dir_all(&dir).context(tr(
+            "Создать папку «Документы»\\.sshi",
+            "Create the Documents\\.sshi folder",
+        ))?;
         let path = wide(&dir);
         let attributes = unsafe { GetFileAttributesW(path.as_ptr()) };
         if attributes == INVALID_FILE_ATTRIBUTES
             || unsafe { SetFileAttributesW(path.as_ptr(), attributes | FILE_ATTRIBUTE_HIDDEN) } == 0
         {
-            return Err(last_error()).context("Скрыть папку .sshi");
+            return Err(last_error()).context(tr("Скрыть папку .sshi", "Hide the .sshi folder"));
+        }
+        match fs::read_to_string(dir.join("language.txt")) {
+            Ok(value) => crate::lang::set_english(value.trim() == "en"),
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("Read the SSHI language preference"),
         }
         Ok(Self { dir })
+    }
+
+    pub fn set_english(&self, english: bool) -> Result<()> {
+        self.temp_file(if english { b"en\n" } else { b"ru\n" })?
+            .persist(self.dir.join("language.txt"))
+            .context(tr(
+                "Сохранить выбранный язык",
+                "Save the SSHI language preference",
+            ))?;
+        crate::lang::set_english(english);
+        Ok(())
     }
 
     pub fn path(&self) -> &Path {
@@ -120,9 +144,15 @@ impl Store {
 
     fn read_profiles(&self) -> Result<Profiles> {
         match fs::read_to_string(self.dir.join("connections.toml")) {
-            Ok(text) => toml::from_str(&text).context("Прочитать список подключений"),
+            Ok(text) => toml::from_str(&text).context(tr(
+                "Прочитать список подключений",
+                "Read the connection list",
+            )),
             Err(error) if error.kind() == ErrorKind::NotFound => Ok(Profiles::default()),
-            Err(error) => Err(error).context("Прочитать список подключений"),
+            Err(error) => Err(error).context(tr(
+                "Прочитать список подключений",
+                "Read the connection list",
+            )),
         }
     }
 
@@ -136,8 +166,10 @@ impl Store {
     fn write_profiles(&self, profiles: &Profiles) -> Result<()> {
         let text = toml::to_string_pretty(profiles)?;
         let file = self.temp_file(text.as_bytes())?;
-        file.persist(self.dir.join("connections.toml"))
-            .context("Сохранить список подключений")?;
+        file.persist(self.dir.join("connections.toml")).context(tr(
+            "Сохранить список подключений",
+            "Save the connection list",
+        ))?;
         Ok(())
     }
 
@@ -193,35 +225,45 @@ impl Store {
         let path = self.dir.join("identity.dat");
         match fs::read(&path) {
             Ok(data) => {
-                let secret =
-                    crypt(&data, false).context("Расшифровать ключ iroh в профиле Windows")?;
-                let bytes: [u8; 32] = secret
-                    .try_into()
-                    .map_err(|_| anyhow::anyhow!("Некорректный ключ iroh"))?;
+                let secret = crypt(&data, false).context(tr(
+                    "Расшифровать ключ iroh в профиле Windows",
+                    "Decrypt the Iroh key in the Windows profile",
+                ))?;
+                let bytes: [u8; 32] = secret.try_into().map_err(|_| {
+                    anyhow::anyhow!(tr("Некорректный ключ iroh", "Invalid Iroh key"))
+                })?;
                 Ok(SecretKey::from_bytes(&bytes))
             }
             Err(error) if error.kind() == ErrorKind::NotFound => {
                 let key = SecretKey::generate();
-                let data = crypt(&key.to_bytes(), true).context("Защитить ключ iroh")?;
+                let data = crypt(&key.to_bytes(), true)
+                    .context(tr("Защитить ключ iroh", "Protect the Iroh key"))?;
                 self.temp_file(&data)?
                     .persist_noclobber(path)
-                    .context("Сохранить ключ iroh")?;
+                    .context(tr("Сохранить ключ iroh", "Save the Iroh key"))?;
                 Ok(key)
             }
-            Err(error) => Err(error).context("Прочитать ключ iroh"),
+            Err(error) => Err(error).context(tr("Прочитать ключ iroh", "Read the Iroh key")),
         }
     }
 
     pub fn ssh_identity(&self) -> Result<Option<PrivateKey>> {
         match fs::read(self.dir.join("ssh-identity.dat")) {
             Ok(data) => {
-                let private = crypt(&data, false).context("Расшифровать сохранённый SSH-ключ")?;
-                let key =
-                    PrivateKey::from_openssh(private).context("Прочитать сохранённый SSH-ключ")?;
+                let private = crypt(&data, false).context(tr(
+                    "Расшифровать сохранённый SSH-ключ",
+                    "Decrypt the saved SSH key",
+                ))?;
+                let key = PrivateKey::from_openssh(private).context(tr(
+                    "Прочитать сохранённый SSH-ключ",
+                    "Read the saved SSH key",
+                ))?;
                 Ok(Some(key))
             }
             Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error).context("Открыть сохранённый SSH-ключ"),
+            Err(error) => {
+                Err(error).context(tr("Открыть сохранённый SSH-ключ", "Open the saved SSH key"))
+            }
         }
     }
 
@@ -231,12 +273,13 @@ impl Store {
             return Ok(key);
         }
         let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519)
-            .context("Создать SSH-ключ Ed25519")?;
+            .context(tr("Создать SSH-ключ Ed25519", "Create an Ed25519 SSH key"))?;
         let private = key.to_openssh(LineEnding::LF)?;
-        let protected = crypt(private.as_bytes(), true).context("Защитить SSH-ключ")?;
+        let protected = crypt(private.as_bytes(), true)
+            .context(tr("Защитить SSH-ключ", "Protect the SSH key"))?;
         self.temp_file(&protected)?
             .persist_noclobber(self.dir.join("ssh-identity.dat"))
-            .context("Сохранить SSH-ключ")?;
+            .context(tr("Сохранить SSH-ключ", "Save the SSH key"))?;
         Ok(key)
     }
 
@@ -251,14 +294,19 @@ impl Store {
             match file.try_lock() {
                 Ok(()) => {}
                 Err(TryLockError::WouldBlock) => {
-                    bail!("Этот экземпляр sshi уже используется в другом окне")
+                    bail!(tr(
+                        "Этот экземпляр sshi уже используется в другом окне",
+                        "This SSHI instance is already in use in another window"
+                    ))
                 }
                 Err(TryLockError::Error(error)) => {
-                    return Err(error).context("Заблокировать файл состояния");
+                    return Err(error)
+                        .context(tr("Заблокировать файл состояния", "Lock the state file"));
                 }
             }
         } else {
-            file.lock().context("Заблокировать файл состояния")?;
+            file.lock()
+                .context(tr("Заблокировать файл состояния", "Lock the state file"))?;
         }
         Ok(file)
     }
@@ -267,7 +315,10 @@ impl Store {
         match fs::read_to_string(self.dir.join(format!("host-{endpoint}.txt"))) {
             Ok(value) => Ok(Some(value.trim().to_owned())),
             Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error).context("Прочитать отпечаток SSH-сервера"),
+            Err(error) => Err(error).context(tr(
+                "Прочитать отпечаток SSH-сервера",
+                "Read the SSH host key fingerprint",
+            )),
         }
     }
 
@@ -281,11 +332,17 @@ impl Store {
             Err(error) if error.error.kind() == ErrorKind::AlreadyExists => {
                 ensure!(
                     self.host_fingerprint(endpoint)?.as_deref() == Some(fingerprint),
-                    "Ключ SSH-сервера отличается от отпечатка, сохранённого другим окном"
+                    tr(
+                        "Ключ SSH-сервера отличается от отпечатка, сохранённого другим окном",
+                        "The SSH host key differs from the fingerprint saved by another window"
+                    )
                 );
                 Ok(())
             }
-            Err(error) => Err(error).context("Сохранить отпечаток SSH-сервера"),
+            Err(error) => Err(error).context(tr(
+                "Сохранить отпечаток SSH-сервера",
+                "Save the SSH host key fingerprint",
+            )),
         }
     }
 
@@ -302,7 +359,10 @@ pub fn crypt(input: &[u8], protect: bool) -> Result<Vec<u8>> {
         return Ok(Vec::new());
     }
     let source = CRYPT_INTEGER_BLOB {
-        cbData: input.len().try_into().context("Данные слишком велики")?,
+        cbData: input
+            .len()
+            .try_into()
+            .context(tr("Данные слишком велики", "The data is too large"))?,
         pbData: input.as_ptr().cast_mut(),
     };
     let mut dest = CRYPT_INTEGER_BLOB {

@@ -27,6 +27,13 @@ pub enum Profiles {
         #[arg(long, allow_hyphen_values = true)]
         previous: Option<String>,
     },
+    /// Rename a saved connection without changing its settings.
+    Rename {
+        #[arg(long, allow_hyphen_values = true)]
+        name: String,
+        #[arg(long, allow_hyphen_values = true)]
+        to: String,
+    },
     /// Remove a named connection.
     Remove {
         #[arg(long, allow_hyphen_values = true)]
@@ -41,15 +48,20 @@ pub enum Profiles {
     },
 }
 
-fn find<'a>(profiles: &'a [Profile], name: &str) -> Option<&'a Profile> {
+fn position(profiles: &[Profile], name: &str) -> Option<usize> {
     let folded = name.to_lowercase();
-    profiles.iter().find(|p| p.name.to_lowercase() == folded)
+    profiles
+        .iter()
+        .position(|p| p.name.to_lowercase() == folded)
+}
+
+fn profile_index(profiles: &[Profile], name: &str) -> Result<usize> {
+    position(profiles, name).with_context(|| format!("no connection named '{name}'"))
 }
 
 pub fn lookup(name: &str) -> Result<Profile> {
-    find(&State::load()?.library()?.connections, name)
-        .cloned()
-        .with_context(|| format!("no connection named '{name}'"))
+    let profiles = State::load()?.library()?.connections;
+    Ok(profiles[profile_index(&profiles, name)?].clone())
 }
 
 pub fn command(profile: &Profile) -> Result<Command> {
@@ -92,20 +104,11 @@ pub fn run(action: Profiles) -> Result<()> {
             profile.validate()?;
             state.update_library(|library| {
                 if let Some(old) = previous {
-                    let idx = library
-                        .connections
-                        .iter()
-                        .position(|p| p.name.to_lowercase() == old.to_lowercase())
-                        .with_context(|| format!("no connection named '{old}'"))?;
-                    library.connections.remove(idx);
-                    ensure!(
-                        find(&library.connections, &profile.name).is_none(),
-                        "connection name already in use"
-                    );
-                    library.connections.insert(idx, profile);
+                    let idx = profile_index(&library.connections, &old)?;
+                    library.connections[idx] = profile;
                 } else {
                     ensure!(
-                        find(&library.connections, &profile.name).is_none(),
+                        position(&library.connections, &profile.name).is_none(),
                         "connection name already in use; use --previous to edit"
                     );
                     library.connections.push(profile);
@@ -113,15 +116,14 @@ pub fn run(action: Profiles) -> Result<()> {
                 Ok(())
             })
         }
+        Profiles::Rename { name, to } => state.update_library(|library| {
+            let index = profile_index(&library.connections, &name)?;
+            library.connections[index].name = to;
+            Ok(())
+        }),
         Profiles::Remove { name } => state.update_library(|library| {
-            let old = library.connections.len();
-            library
-                .connections
-                .retain(|p| p.name.to_lowercase() != name.to_lowercase());
-            ensure!(
-                old != library.connections.len(),
-                "no connection named '{name}'"
-            );
+            let index = profile_index(&library.connections, &name)?;
+            library.connections.remove(index);
             Ok(())
         }),
         Profiles::Run { name, args } => {

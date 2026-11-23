@@ -60,6 +60,13 @@ jobs:
           sudo apt-get install -y xvfb gir1.2-gtk-3.0 python3-gi ./dist/*_amd64.deb
           sshi --version
           xvfb-run -a sshi-desktop --smoke-test
+          for test in profile_clicks gtk_forward; do
+            if ! xvfb-run -a /usr/bin/python3 "tests/$test.py" /usr/bin/sshi > "$RUNNER_TEMP/gtk-test.log" 2>&1; then
+              tail -15 "$RUNNER_TEMP/gtk-test.log" | while IFS= read -r line; do echo "::error::$line"; done
+              exit 1
+            fi
+            cat "$RUNNER_TEMP/gtk-test.log"
+          done
           tests/run-relay-smoke.sh dist/*_amd64.deb
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -119,10 +126,14 @@ jobs:
           test -x /usr/local/bin/sshi-copy-iid
           sshi id
           /Applications/SSHI.app/Contents/MacOS/SSHI --smoke-test
+          bash desktop/macos/test-clicks.sh 2>&1 | tee "$RUNNER_TEMP/sshi-mac-gui.log"
       - if: failure()
         run: |
           if test -f "$RUNNER_TEMP/sshi-mac-build.log"; then
             tail -40 "$RUNNER_TEMP/sshi-mac-build.log" | while IFS= read -r line; do echo "::error::$line"; done
+          fi
+          if test -f "$RUNNER_TEMP/sshi-mac-gui.log"; then
+            head -40 "$RUNNER_TEMP/sshi-mac-gui.log" | while IFS= read -r line; do echo "::error::$line"; done
           fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

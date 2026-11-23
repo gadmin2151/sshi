@@ -3,7 +3,7 @@ import Foundation
 import SwiftUI
 import UniformTypeIdentifiers
 
-struct Profile: Codable, Identifiable {
+struct Profile: Codable, Equatable, Identifiable {
     let name: String
     let user: String
     let endpoint: String
@@ -47,7 +47,7 @@ enum Client {
         guard process.terminationStatus == 0 else {
             let detail = String(decoding: contents, as: UTF8.self)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            throw ClientError(message: detail.isEmpty ? "Команда завершилась с ошибкой." : detail)
+            throw ClientError(message: AppLanguage.current().commandError(detail))
         }
         return contents
     }
@@ -74,18 +74,19 @@ enum Client {
         """
         let wrapper = """
         hold=$1
-        shift
+        prompt=$2
+        shift 2
         "$@"
         result=$?
         if [ "$hold" = yes ] || [ "$result" != 0 ]; then
-            printf '\\nНажмите Enter, чтобы завершить. '
+            printf '\\n%s ' "$prompt"
             read -r answer
         fi
         exit "$result"
         """
         _ = try execute(URL(fileURLWithPath: "/usr/bin/osascript"), [
             "-e", script, "/bin/sh", "-c", wrapper, "sshi-terminal",
-            hold ? "yes" : "no", binary.path
+            hold ? "yes" : "no", tr("Нажмите Enter, чтобы завершить.", "Press Enter to finish."), binary.path
         ] + arguments)
     }
 }
@@ -157,7 +158,7 @@ final class Workspace: ObservableObject {
             let id = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(id, forType: .string)
-            feedback = "Мой Endpoint ID скопирован.\n\n" + id
+            feedback = tr("Мой Endpoint ID скопирован.", "Your Endpoint ID has been copied.") + "\n\n" + id
         }
     }
 
@@ -172,13 +173,14 @@ final class Workspace: ObservableObject {
             panel = NSSavePanel()
             panel.nameFieldStringValue = "sshi-connections.json"
         }
-        panel.title = restore ? "Импорт подключений" : "Экспорт подключений"
+        panel.title = restore ? tr("Импорт подключений", "Import connections") : tr("Экспорт подключений", "Export connections")
+        panel.prompt = restore ? tr("Импортировать", "Import") : tr("Экспортировать", "Export")
         panel.allowedContentTypes = [.json]
         guard panel.runModal() == .OK, let url = panel.url else { return }
         perform {
             try Client.run([restore ? "restore" : "backup", url.path])
             if restore { try reload() }
-            feedback = restore ? "Подключения импортированы." : "Резервная копия сохранена."
+            feedback = restore ? tr("Подключения импортированы.", "Connections imported.") : tr("Резервная копия сохранена.", "Backup saved.")
         }
     }
 
@@ -186,9 +188,9 @@ final class Workspace: ObservableObject {
 
     func remove(_ profile: Profile) {
         let alert = NSAlert()
-        alert.messageText = "Удалить подключение «\(profile.name)»?"
-        alert.addButton(withTitle: "Отмена")
-        alert.addButton(withTitle: "Удалить")
+        alert.messageText = tr("Удалить подключение «\(profile.name)»?", "Delete the connection “\(profile.name)”?")
+        alert.addButton(withTitle: tr("Отмена", "Cancel"))
+        alert.addButton(withTitle: tr("Удалить", "Delete"))
         guard alert.runModal() == .alertSecondButtonReturn else { return }
         perform {
             try Client.run(["profile", "remove", "--name", profile.name])
@@ -201,6 +203,7 @@ final class Workspace: ObservableObject {
 struct ProfileDetail: View {
     @ObservedObject var workspace: Workspace
     let profile: Profile
+    let language: AppLanguage
 
     private func field(_ title: String, _ value: String) -> some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -214,69 +217,282 @@ struct ProfileDetail: View {
             VStack(alignment: .leading, spacing: 19) {
                 Image(systemName: "terminal.fill").font(.system(size: 26)).foregroundColor(.accentColor)
                 Text(profile.name).font(.largeTitle.bold()).textSelection(.enabled)
-                field("Пользователь SSH", profile.user)
+                field(language("Пользователь SSH", "SSH user"), profile.user)
                 field("Endpoint ID", profile.endpoint)
-                field("Relay", profile.relay.isEmpty ? "Из настроек SSHI" : profile.relay)
+                field("Relay", profile.relay.isEmpty ? language("Из настроек SSHI", "From SSHI settings") : profile.relay)
                 HStack(spacing: 12) {
                     Button {
                         workspace.launch(["connect", profile.name], hold: false)
-                    } label: { Label("Открыть терминал", systemImage: "terminal") }
+                    } label: { Label(language("Открыть терминал", "Open terminal"), systemImage: "terminal") }
                         .buttonStyle(.borderedProminent).controlSize(.large)
-                    Button("Изменить") { workspace.show(.edit(profile)) }
+                    Button(language("Изменить", "Edit")) { workspace.show(.edit(profile)) }
                 }
                 Divider()
                 HStack(spacing: 16) {
-                    Menu("Доступ") {
-                        Button("Токен этого relay…") { workspace.show(.token(profile)) }
-                        Button("Ввести приглашение…") {
+                    Menu(language("Доступ", "Access")) {
+                        Button(language("Токен этого relay…", "Relay token…")) { workspace.show(.token(profile)) }
+                        Button(language("Ввести приглашение…", "Redeem invitation…")) {
                             workspace.launch(profile.prefix + ["copy-iid", "--invite", profile.destination])
                         }
-                        Button("Создать приглашение…") { workspace.show(.invite(profile)) }
-                        Button("Установить SSH-ключ…") { workspace.show(.key(profile)) }
+                        Button(language("Создать приглашение…", "Create invitation…")) { workspace.show(.invite(profile)) }
+                        Button(language("Установить SSH-ключ…", "Install SSH key…")) { workspace.show(.key(profile)) }
                     }.fixedSize()
-                    Button("Пробросить порт…") { workspace.show(.forward(profile)) }
+                    Button(language("Пробросить порт…", "Forward a port…")) { workspace.show(.forward(profile)) }
                 }
             }.padding(30).frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 }
 
+private final class ProfileCell: NSTableCellView {
+    let name = NSTextField(labelWithString: "")
+    let address = NSTextField(labelWithString: "")
+
+    init() {
+        super.init(frame: .zero)
+        name.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
+        name.lineBreakMode = .byTruncatingTail
+        address.font = .monospacedSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
+        address.textColor = .secondaryLabelColor
+        address.lineBreakMode = .byTruncatingTail
+        textField = name
+        let stack = NSStackView(views: [name, address])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 3
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
+            stack.centerYAnchor.constraint(equalTo: centerYAnchor),
+            name.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            address.widthAnchor.constraint(equalTo: stack.widthAnchor)
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+}
+
+@MainActor
+final class ProfileTable: NSTableView, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate {
+    private let workspace: Workspace
+    private let openProfile: (String) -> Void
+    private var profiles: [Profile] = []
+    private var syncing = false
+    private var lastClicked: String?
+    private var previousMouseDown: String?
+    private var doubleClickName: String?
+    private var renameTimer: Timer?
+    private var editingName: String?
+
+    init(_ workspace: Workspace, openProfile: @escaping (String) -> Void) {
+        self.workspace = workspace
+        self.openProfile = openProfile
+        super.init(frame: .zero)
+        headerView = nil
+        style = .sourceList
+        rowHeight = 45
+        allowsMultipleSelection = false
+        allowsEmptySelection = false
+        columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
+        let column = NSTableColumn(identifier: .init("profile"))
+        column.title = tr("Подключения", "Connections")
+        addTableColumn(column)
+        delegate = self
+        dataSource = self
+        target = self
+        action = #selector(singleClick(_:))
+        doubleAction = #selector(doubleClick(_:))
+        setAccessibilityLabel(column.title)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    func update(_ profiles: [Profile], selected: String?, language: AppLanguage = .current()) {
+        let title = language("Подключения", "Connections")
+        if tableColumns.first?.title != title {
+            tableColumns.first?.title = title
+            setAccessibilityLabel(title)
+        }
+        syncing = true
+        defer { syncing = false }
+        if self.profiles != profiles {
+            resetClicks()
+            self.profiles = profiles
+            reloadData()
+        }
+        let row = profiles.firstIndex { $0.name == selected }
+        if selectedRow != (row ?? -1) {
+            resetClicks()
+            selectRowIndexes(row.map { IndexSet(integer: $0) } ?? [], byExtendingSelection: false)
+            if let row = row { scrollRowToVisible(row) }
+        }
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int { profiles.count }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        let cell = makeView(withIdentifier: .init("profileCell"), owner: self) as? ProfileCell ?? ProfileCell()
+        cell.identifier = .init("profileCell")
+        let profile = profiles[row]
+        cell.name.stringValue = profile.name
+        cell.name.delegate = self
+        cell.name.isEditable = false
+        cell.name.isSelectable = false
+        cell.address.stringValue = profile.user + "@" + String(profile.endpoint.prefix(10)) + "…"
+        return cell
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        guard !syncing else { return }
+        let name = profiles.indices.contains(selectedRow) ? profiles[selectedRow].name : nil
+        if name != lastClicked { resetClicks() }
+        workspace.selected = name
+    }
+
+    func tableView(_ tableView: NSTableView, typeSelectStringFor tableColumn: NSTableColumn?, row: Int) -> String? {
+        profiles[row].name
+    }
+
+    private func resetClicks() {
+        renameTimer?.invalidate()
+        renameTimer = nil
+        lastClicked = nil
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        // A second mouse-down can arrive while AppKit is still tracking its mouse-up.
+        renameTimer?.invalidate()
+        let row = row(at: convert(event.locationInWindow, from: nil))
+        let name = profiles.indices.contains(row) ? profiles[row].name : nil
+        // WindowServer counts clicks by location. Adjacent rows can share the double-click slop.
+        doubleClickName = event.clickCount == 2 && name == previousMouseDown ? name : nil
+        previousMouseDown = name
+        if row != selectedRow { resetClicks() }
+        super.mouseDown(with: event)
+    }
+
+    override func resignFirstResponder() -> Bool {
+        resetClicks()
+        return super.resignFirstResponder()
+    }
+
+    @objc private func singleClick(_ sender: NSTableView) {
+        guard clickedRow == selectedRow, profiles.indices.contains(clickedRow), editingName == nil else { return }
+        let name = profiles[clickedRow].name
+        if lastClicked == name {
+            renameTimer?.invalidate()
+            renameTimer = Timer.scheduledTimer(timeInterval: NSEvent.doubleClickInterval,
+                                                target: self, selector: #selector(startRename(_:)),
+                                                userInfo: nil, repeats: false)
+        }
+        lastClicked = name
+    }
+
+    @objc private func doubleClick(_ sender: NSTableView) {
+        resetClicks()
+        guard profiles.indices.contains(clickedRow), clickedRow == selectedRow,
+              profiles[clickedRow].name == doubleClickName else { return }
+        openProfile(profiles[clickedRow].name)
+    }
+
+    @objc private func startRename(_ timer: Timer) {
+        guard window?.isKeyWindow == true, window?.attachedSheet == nil, window?.firstResponder === self,
+              profiles.indices.contains(selectedRow), lastClicked == profiles[selectedRow].name,
+              let cell = view(atColumn: 0, row: selectedRow, makeIfNecessary: false) as? ProfileCell else { return }
+        editingName = profiles[selectedRow].name
+        resetClicks()
+        cell.name.isEditable = true
+        cell.name.selectText(nil)
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+        if selector == #selector(NSResponder.cancelOperation(_:)), let old = editingName {
+            textView.string = old
+            window?.makeFirstResponder(self)
+            return true
+        }
+        return false
+    }
+
+    func controlTextDidEndEditing(_ notification: Notification) {
+        guard let field = notification.object as? NSTextField, let old = editingName else { return }
+        let new = field.stringValue
+        editingName = nil
+        field.isEditable = false
+        field.isSelectable = false
+        field.stringValue = old
+        let movement = (notification.userInfo?["NSTextMovement"] as? NSNumber)?.intValue
+        if movement != NSCancelTextMovement && new != old {
+            workspace.perform {
+                try Client.run(["profile", "rename", "--name", old, "--to", new])
+                try workspace.reload(select: new)
+            }
+        }
+    }
+
+    override func keyDown(with event: NSEvent) {
+        resetClicks()
+        if (event.keyCode == 36 || event.keyCode == 76) && profiles.indices.contains(selectedRow) {
+            openProfile(profiles[selectedRow].name)
+        } else {
+            super.keyDown(with: event)
+        }
+    }
+}
+
+@MainActor
+private struct ProfileSidebar: NSViewRepresentable {
+    @ObservedObject var workspace: Workspace
+    let language: AppLanguage
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scroll = NSScrollView()
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        let table = ProfileTable(workspace) { workspace.launch(["connect", $0], hold: false) }
+        table.frame = scroll.contentView.bounds
+        table.autoresizingMask = [.width]
+        scroll.documentView = table
+        return scroll
+    }
+
+    func updateNSView(_ scroll: NSScrollView, context: Context) {
+        (scroll.documentView as? ProfileTable)?.update(workspace.visible, selected: workspace.selected, language: language)
+    }
+}
+
 @MainActor
 struct WorkspaceView: View {
     @StateObject private var workspace = Workspace()
+    @AppStorage(AppLanguage.preferenceKey) private var language: AppLanguage = .russian
 
     var body: some View {
         HSplitView {
             VStack(alignment: .leading, spacing: 0) {
-                TextField("Поиск подключений", text: $workspace.query)
+                TextField(language("Поиск подключений", "Search connections"), text: $workspace.query)
                     .textFieldStyle(.roundedBorder).padding(12)
-                List(selection: $workspace.selected) {
-                    ForEach(workspace.visible) { profile in
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(profile.name).font(.headline)
-                            Text(profile.user + "@" + String(profile.endpoint.prefix(10)) + "…")
-                                .font(.system(.caption, design: .monospaced)).foregroundColor(.secondary)
-                        }.padding(.vertical, 4).tag(profile.name)
-                    }
-                }.listStyle(.sidebar)
+                ProfileSidebar(workspace: workspace, language: language)
             }.frame(minWidth: 185, idealWidth: 225, maxWidth: 350)
             Group {
                 if let profile = workspace.current {
-                    ProfileDetail(workspace: workspace, profile: profile)
+                    ProfileDetail(workspace: workspace, profile: profile, language: language)
                 } else {
                     VStack(spacing: 14) {
                         Image(systemName: "terminal").font(.largeTitle).foregroundColor(.accentColor)
-                        Text(workspace.query.isEmpty ? "Подключения" : "Ничего не найдено").font(.title.bold())
+                        Text(workspace.query.isEmpty ? language("Подключения", "Connections") : language("Ничего не найдено", "No matches")).font(.title.bold())
                         if workspace.query.isEmpty {
-                            Text("Сохраните имя, пользователя SSH и Endpoint ID удалённого компьютера.")
+                            Text(language("Сохраните имя, пользователя SSH и Endpoint ID удалённого компьютера.", "Save the SSH user and Endpoint ID of the remote computer under a name."))
                                 .foregroundColor(.secondary).multilineTextAlignment(.center)
-                            Button("Новое подключение") { workspace.show(.edit(nil)) }
+                            Button(language("Новое подключение", "New connection")) { workspace.show(.edit(nil)) }
                                 .buttonStyle(.borderedProminent)
                         }
                     }.padding(40).frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }.frame(minWidth: 420, idealWidth: 535)
         }.frame(minHeight: 500)
+        .environment(\.locale, Locale(identifier: language.rawValue))
         .onAppear {
             if CommandLine.arguments.contains("--smoke-test") {
                 do {
@@ -303,16 +519,19 @@ struct WorkspaceView: View {
         .toolbar {
             ToolbarItemGroup(placement: .automatic) {
                 if workspace.busy { ProgressView().controlSize(.small) }
-                Button { workspace.show(.edit(nil)) } label: { Label("Новое подключение", systemImage: "plus") }
-                    .keyboardShortcut("n").help("Новое подключение")
+                Button { workspace.show(.edit(nil)) } label: { Label(language("Новое подключение", "New connection"), systemImage: "plus") }
+                    .keyboardShortcut("n").help(language("Новое подключение", "New connection"))
+                Button { workspace.show(.settings) } label: { Label(language("Настройки", "Settings"), systemImage: "gearshape") }
+                    .keyboardShortcut(",", modifiers: .command).help(language("Настройки", "Settings"))
                 Menu {
-                    Button("Недавние подключения…") { workspace.show(.recent) }
-                    Button("Скопировать мой Endpoint ID") { workspace.copyId() }
-                    Button("Настройки relay…") { workspace.show(.settings) }
+                    Button(language("Недавние подключения…", "Recent connections…")) { workspace.show(.recent) }
+                    Button(language("Скопировать мой Endpoint ID", "Copy my Endpoint ID")) { workspace.copyId() }
                     Divider()
-                    Button("Экспорт подключений…") { workspace.backup(restore: false) }
-                    Button("Импорт подключений…") { workspace.backup(restore: true) }
-                } label: { Label("Настройки и данные", systemImage: "ellipsis.circle") }
+                    Button(language("Экспорт подключений…", "Export connections…")) { workspace.backup(restore: false) }
+                    Button(language("Импорт подключений…", "Import connections…")) { workspace.backup(restore: true) }
+                    Divider()
+                    Link(language.whatsNew, destination: AppLanguage.releaseNotes)
+                } label: { Label(language("Действия", "Actions"), systemImage: "ellipsis.circle") }
             }
         }
         .sheet(item: $workspace.sheet) { item in Editor(workspace: workspace, panel: item.panel) }
@@ -332,78 +551,92 @@ struct Editor: View {
     @State private var token = ""
     @State private var originalRelay = ""
     @State private var path = ""
-    @State private var flag = "L"
-    @State private var rule = ""
+    @State private var forward = ForwardDraft()
+    @AppStorage(AppLanguage.preferenceKey) private var language: AppLanguage = .russian
     @State private var error = ""
     @State private var recent: [String] = []
     @State private var selectedRecent: String?
 
     private var title: String {
         switch panel {
-        case .edit(let old): return old == nil ? "Новое подключение" : "Настройки подключения"
-        case .settings: return "Настройки relay"
-        case .recent: return "Сохранить недавнее подключение"
-        case .token: return "Токен relay"
-        case .key: return "Установить SSH-ключ"
-        case .invite: return "Создать приглашение"
-        case .forward: return "Проброс порта"
+        case .edit(let old): return old == nil ? language("Новое подключение", "New connection") : language("Настройки подключения", "Connection settings")
+        case .settings: return language("Настройки", "Settings")
+        case .recent: return language("Сохранить недавнее подключение", "Save a recent connection")
+        case .token: return language("Токен relay", "Relay token")
+        case .key: return language("Установить SSH-ключ", "Install SSH key")
+        case .invite: return language("Создать приглашение", "Create invitation")
+        case .forward: return language("Проброс порта", "Port forwarding")
         }
+    }
+
+    private var panelWidth: CGFloat {
+        if case .forward = panel { return 555 }
+        return 485
+    }
+
+    private var forwardError: String? {
+        guard case .forward(let profile) = panel else { return nil }
+        do { _ = try forward.arguments(profile: profile.name, language: language) }
+        catch { return error.localizedDescription }
+        return nil
     }
 
     private var primary: String {
         switch panel {
-        case .invite: return "Создать"
-        case .forward: return "Открыть туннель"
-        case .key: return "Установить"
-        default: return "Сохранить"
+        case .invite: return language("Создать", "Create")
+        case .forward: return language("Открыть туннель", "Open tunnel")
+        case .key: return language("Установить", "Install")
+        default: return language("Сохранить", "Save")
         }
     }
 
     @ViewBuilder private var form: some View {
         switch panel {
         case .edit:
-            TextField("Имя", text: $name)
-            TextField("Пользователь SSH", text: $user)
+            TextField(language("Имя", "Name"), text: $name)
+            TextField(language("Пользователь SSH", "SSH user"), text: $user)
             TextField("Endpoint ID", text: $endpoint)
-            TextField("Relay (из настроек, если пусто)", text: $relay)
+            TextField(language("Relay (из настроек, если пусто)", "Relay (leave blank to use settings)"), text: $relay)
         case .recent:
             if recent.isEmpty {
-                Text("Здесь появятся успешные SSH-подключения.").foregroundColor(.secondary)
+                Text(language("Здесь появятся успешные SSH-подключения.", "Successful SSH connections will appear here.")).foregroundColor(.secondary)
             } else {
-                Picker("Подключение", selection: $selectedRecent) {
+                Picker(language("Подключение", "Connection"), selection: $selectedRecent) {
                     ForEach(recent, id: \.self) { entry in
                         Text(entry).truncationMode(.middle).tag(Optional(entry))
                     }
                 }
-                TextField("Имя", text: $name)
+                TextField(language("Имя", "Name"), text: $name)
             }
         case .token(let p):
-            Text(p.relay.isEmpty ? "Relay из настроек SSHI" : p.relay).foregroundColor(.secondary)
-            SecureField("Новый токен", text: $token)
+            Text(p.relay.isEmpty ? language("Relay из настроек SSHI", "Relay from SSHI settings") : p.relay).foregroundColor(.secondary)
+            SecureField(language("Новый токен", "New token"), text: $token)
         case .invite(let p):
-            TextField("Endpoint ID нового ПК", text: $endpoint)
-            TextField("Пользователь службы (по умолчанию \(p.user))", text: $user)
+            TextField(language("Endpoint ID нового ПК", "New computer’s Endpoint ID"), text: $endpoint)
+            TextField(language("Пользователь службы (по умолчанию \(p.user))", "Service user (default: \(p.user))"), text: $user)
         case .settings:
-            TextField("Relay по умолчанию", text: $relay)
-            SecureField("Заменить токен (пусто — оставить текущий)", text: $token)
+            Picker(language("Язык интерфейса", "Interface language"), selection: $language) {
+                Text(verbatim: "Русский").tag(AppLanguage.russian)
+                Text(verbatim: "English").tag(AppLanguage.english)
+            }
+            TextField(language("Relay по умолчанию", "Default relay"), text: $relay)
+            SecureField(language("Заменить токен (пусто — оставить текущий)", "Replace token (leave blank to keep it)"), text: $token)
+            Link(language.whatsNew, destination: AppLanguage.releaseNotes)
         case .key:
             HStack {
-                TextField("Публичный SSH-ключ", text: $path)
-                Button("Выбрать…") {
+                TextField(language("Публичный SSH-ключ", "Public SSH key"), text: $path)
+                Button(language("Выбрать…", "Choose…")) {
                     let picker = NSOpenPanel()
                     picker.canChooseDirectories = false
                     picker.showsHiddenFiles = true
+                    picker.title = language("Публичный SSH-ключ", "Public SSH key")
+                    picker.prompt = language("Выбрать", "Choose")
                     if picker.runModal() == .OK { path = picker.url?.path ?? "" }
                 }
             }
-            Text("Пустое поле использует стандартный ключ из ~/.ssh.").foregroundColor(.secondary)
+            Text(language("Пустое поле использует стандартный ключ из ~/.ssh.", "Leave this blank to use the default key in ~/.ssh.")).foregroundColor(.secondary)
         case .forward:
-            Picker("Направление", selection: $flag) {
-                Text("Локальный").tag("L")
-                Text("Удалённый").tag("R")
-                Text("SOCKS").tag("D")
-            }
-            TextField("Правило OpenSSH", text: $rule)
+            EmptyView()
         }
     }
 
@@ -450,7 +683,7 @@ struct Editor: View {
                 try Client.run(args, input: token + "\n")
             case .recent:
                 guard let selection = selectedRecent, let split = selection.lastIndex(of: "@") else {
-                    throw ClientError(message: "Выберите подключение.")
+                    throw ClientError(message: language("Выберите подключение.", "Select a connection."))
                 }
                 let user = String(selection[..<split])
                 let endpoint = String(selection[selection.index(after: split)...])
@@ -465,8 +698,7 @@ struct Editor: View {
                 if !path.isEmpty { args += ["-i", (path as NSString).expandingTildeInPath] }
                 workspace.launch(p.prefix + args + [p.destination])
             case .forward(let p):
-                guard !rule.isEmpty else { throw ClientError(message: "Укажите правило OpenSSH.") }
-                workspace.launch(p.prefix + ["-N", "-" + flag, rule, p.destination])
+                workspace.launch(try forward.arguments(profile: p.name, language: language), hold: false)
             }
             workspace.sheet = nil
         } catch { self.error = error.localizedDescription }
@@ -475,21 +707,29 @@ struct Editor: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             Text(title).font(.title2.bold())
-            Form { form }
-            if !error.isEmpty { Text(error).foregroundColor(.red).textSelection(.enabled) }
+            if case .forward(let profile) = panel {
+                ForwardForm(draft: $forward, profile: profile.name, language: language)
+            } else {
+                Form { form }
+            }
+            if let message = forwardError ?? (error.isEmpty ? nil : error) {
+                Text(message).foregroundColor(.red).textSelection(.enabled)
+            }
             HStack {
                 if case .edit(let old) = panel, let p = old {
-                    Button("Удалить…", role: .destructive) { workspace.remove(p) }
+                    Button(language("Удалить…", "Delete…"), role: .destructive) { workspace.remove(p) }
                 }
                 Spacer()
-                Button("Отмена") { workspace.sheet = nil }.keyboardShortcut(.cancelAction)
-                Button(primary) { save() }.keyboardShortcut(.defaultAction)
+                Button(language("Отмена", "Cancel")) { workspace.sheet = nil }.keyboardShortcut(.cancelAction)
+                Button(primary) { save() }.keyboardShortcut(.defaultAction).disabled(forwardError != nil)
             }
-        }.padding(24).frame(width: 485)
+        }.padding(24).frame(width: panelWidth)
+        .environment(\.locale, Locale(identifier: language.rawValue))
         .onAppear { load() }
     }
 }
 
+#if !PROFILE_CLICK_TEST
 @main
 struct SSHIDesktop: App {
     var body: some Scene {
@@ -498,3 +738,4 @@ struct SSHIDesktop: App {
         }.commands { CommandGroup(replacing: .newItem) {} }
     }
 }
+#endif

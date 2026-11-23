@@ -186,6 +186,33 @@ with tempfile.TemporaryDirectory(prefix="sshi.") as tmp:
                         assert check(run(["sshi", "list"], env=initiator), "history of repeated and active sessions") == recorded
                         result = run([*sshi, destination, "printf concurrent"], env=initiator)
                         assert check(result, "parallel session") == b"concurrent"
+                    # The desktop launches this entry point with one argument per field.
+                    # Use the host's OpenSSH settings for the test profile, as in the app.
+                    with pathlib.Path("/etc/ssh/ssh_config.d/10-sshi-smoke.conf").open("a") as config:
+                        config.write(f"Host {receiver_id}\n  IdentityFile {base / 'login'}\n")
+                    check(run(["sshi", "profile", "save", "--name", "Workshop", "--user", "root",
+                               "--endpoint", receiver_id], env=initiator), "create desktop profile")
+                    for kind in ("local", "remote", "dynamic"):
+                        with socket.socket() as sock:
+                            sock.bind(("127.0.0.1", 0))
+                            listen = sock.getsockname()[1]
+                        target = local_http if kind == "remote" else remote_http
+                        action = ["sshi", "forward", "--profile", "Workshop", "--kind", kind,
+                                  "--bind-host", "127.0.0.1", "--bind-port", str(listen)]
+                        request = ["curl", "-fsS", "--max-time", "2"]
+                        if kind == "dynamic":
+                            request += ["--noproxy", "", "--socks5-hostname", f"127.0.0.1:{listen}",
+                                        f"http://127.0.0.1:{target}"]
+                        else:
+                            action += ["--target-host", "127.0.0.1", "--target-port", str(target)]
+                            request += ["--noproxy", "*", f"http://127.0.0.1:{listen}"]
+                        expected = b"initiator" if kind == "remote" else b"receiver"
+                        with daemon(action, env=initiator, logfile=forward_log) as tunnel:
+                            def profile_ready():
+                                if tunnel.poll() is not None:
+                                    raise AssertionError(text(forward_log.read_bytes()))
+                                return run(request, timeout=3).stdout == expected
+                            wait_for(profile_ready, f"desktop {kind} forwarding")
                 print("Local, reverse and SOCKS port forwarding via iroh, with concurrent SSH: pass", flush=True)
 
 print("Installed Debian package passed the SSH and forwarding tests.", flush=True)

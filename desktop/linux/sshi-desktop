@@ -1,23 +1,75 @@
 #!/usr/bin/python3
 """GTK client for the same SSHI profiles, settings and sessions used by the CLI."""
+import ipaddress
 import json
+import locale
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
+import tempfile
 
 try:
     import gi
     gi.require_version("Gtk", "3.0")
     gi.require_version("Gdk", "3.0")
-    from gi.repository import Gdk, GdkPixbuf, Gtk, Pango
+    from gi.repository import Gdk, GdkPixbuf, GLib, Gtk, Pango
 except (ImportError, ValueError):
     sys.exit("Install python3-gi and gir1.2-gtk-3.0 to run SSHI Desktop.")
 
 SSHI = str(Path(sys.argv[0]).absolute().with_name("sshi"))
 if not os.path.isfile(SSHI):
     SSHI = shutil.which("sshi") or "sshi"
+
+LANGUAGE_FILE = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "sshi/desktop-language"
+RELEASE_URL = "https://github.com/gadmin2151/sshi/releases/tag/v0.2.1"
+
+
+def read_language():
+    try:
+        return "en" if LANGUAGE_FILE.read_text(encoding="utf-8").strip() == "en" else "ru"
+    except (OSError, UnicodeError):
+        return "ru"
+
+
+def apply_gtk_language(value):
+    # GTK's own dialogs and accessible stock controls use gettext.
+    os.environ["LANGUAGE"] = value
+    old = locale.setlocale(locale.LC_MESSAGES)
+    locale.setlocale(locale.LC_MESSAGES, "C")
+    for candidate in ("ru_RU.UTF-8" if value == "ru" else "en_US.UTF-8", "", "en_US.UTF-8", old):
+        try:
+            loc = locale.setlocale(locale.LC_MESSAGES, candidate)
+            if loc.split(".")[0] not in ("C", "POSIX"):
+                break
+        except locale.Error:
+            continue
+
+
+def save_language(value):
+    global language
+    LANGUAGE_FILE.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=LANGUAGE_FILE.parent, delete=False) as file:
+        try:
+            file.write((value + "\n").encode("ascii"))
+            file.flush()
+            os.replace(file.name, LANGUAGE_FILE)
+        finally:
+            if os.path.exists(file.name):
+                os.unlink(file.name)
+    language = value
+    apply_gtk_language(value)
+
+
+language = read_language()
+apply_gtk_language(language)
+
+
+def tr(ru, en):
+    return en if language == "en" else ru
+
 
 STYLE = b"""
 .sshi-title { font-size: 24pt; font-weight: bold; }
@@ -32,6 +84,10 @@ STYLE = b"""
 .sshi-primary.suggested-action:hover { background-color: #198078; }
 .sshi-tool { padding: 7px 10px; }
 
+.sshi-route { padding: 13px; background-color: alpha(@theme_fg_color, 0.04); border: 1px solid alpha(@theme_fg_color, 0.18); border-radius: 9px; }
+.sshi-route-icon { padding: 8px; background-color: #17665f; color: white; border-radius: 9px; }
+.sshi-route-line { min-height: 2px; background-color: @theme_fg_color; opacity: 0.64; }
+.sshi-arrow { font-size: 9pt; }
 .sshi-detail { padding: 30px; }
 .sshi-sidebar { padding: 14px; }
 .sshi-row { padding: 8px 5px; }
@@ -75,17 +131,18 @@ def cli(*args, stdin=None):
     result = subprocess.run([SSHI, *args], input=stdin, capture_output=True,
                             text=True, timeout=8, check=False)
     if result.returncode != 0:
-        raise ValueError(result.stderr.strip() or "Команда SSHI завершилась с ошибкой.")
+        raise ValueError(result.stderr.strip() or tr("Команда SSHI завершилась с ошибкой.", "The SSHI command failed."))
     return result.stdout.strip()
 
 
 def open_terminal(args, hold):
     wrapper = (
-        'hold=$1; shift; "$@"; result=$?; '
+        'hold=$1; prompt=$2; shift 2; "$@"; result=$?; '
         'if [ "$hold" = yes ] || [ "$result" != 0 ]; then '
-        'printf "\\nНажмите Enter, чтобы закрыть окно."; read -r answer; fi; exit "$result"'
+        'printf "\\n%s" "$prompt"; read -r answer; fi; exit "$result"'
     )
-    command = ["/bin/sh", "-c", wrapper, "sshi-terminal", "yes" if hold else "no", SSHI, *args]
+    command = ["/bin/sh", "-c", wrapper, "sshi-terminal", "yes" if hold else "no",
+               tr("Нажмите Enter, чтобы закрыть окно.", "Press Enter to close this window."), SSHI, *args]
     launchers = [
         ("x-terminal-emulator", "-e"), ("xdg-terminal-exec",),
         ("ptyxis", "--new-window", "--"), ("kgx", "-e"), ("gnome-terminal", "--window", "--"),
@@ -97,7 +154,215 @@ def open_terminal(args, hold):
         if path:
             subprocess.Popen([path, *options, *command], start_new_session=True)
             return
-    raise ValueError("Установите эмулятор терминала, например Konsole или xterm.")
+    raise ValueError(tr("Установите эмулятор терминала, например Konsole или xterm.", "Install a terminal emulator such as Konsole or xterm."))
+
+
+def socket_address(host, port):
+    host, port = host.strip(), port.strip()
+    digits = port.lstrip("0")
+    if not re.fullmatch(r"[0-9]+", port) or not digits or len(digits) > 5 or int(digits) > 65535:
+        raise ValueError(tr("Укажите порт от 1 до 65535.", "Enter a port from 1 to 65535."))
+    literal = host[1:-1] if host.startswith("[") and host.endswith("]") else host
+    try:
+        ipv6 = ":" in literal and "%" not in literal and ipaddress.IPv6Address(literal)
+    except ValueError:
+        ipv6 = False
+    if ipv6:
+        return f"[{literal}]:{port}"
+    dns = host.removesuffix(".")
+    # An IPv4-shaped address must also be a valid IPv4 literal.
+    if re.fullmatch(r"[0-9]+(?:\.[0-9]+){3}", dns):
+        try:
+            ipaddress.IPv4Address(dns)
+        except ValueError:
+            dns = ""
+    if len(dns) > 253 or not all(re.fullmatch(r"[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?", part)
+                                 for part in dns.split(".")):
+        raise ValueError(tr("Укажите IP-адрес или имя хоста.", "Enter an IP address or hostname."))
+    return f"{host}:{port}"
+
+
+class ForwardDialog(Gtk.Dialog):
+    def __init__(self, parent, profile):
+        super().__init__(title=tr("Проброс порта", "Port forwarding"), transient_for=parent, modal=True)
+        self.profile = profile
+        self.set_default_size(590, -1)
+        self.add_button(tr("Отмена", "Cancel"), Gtk.ResponseType.CANCEL)
+        start = self.add_button(tr("Открыть туннель", "Open tunnel"), Gtk.ResponseType.OK)
+        styled(start, "suggested-action", "sshi-primary")
+        self.set_default_response(Gtk.ResponseType.OK)
+        body = box(True, 14)
+        body.set_border_width(18)
+        self.get_content_area().add(body)
+        self.kind = Gtk.ComboBoxText()
+        self.kind.append("local", tr("Открыть удалённый сервис на этом компьютере",
+                                     "Access a remote service from this computer"))
+        self.kind.append("remote", tr("Открыть местный сервис на удалённом компьютере",
+                                      "Access a local service from the remote computer"))
+        self.kind.append("dynamic", tr("Использовать этот компьютер как SOCKS5-прокси",
+                                        "Use this computer as a SOCKS5 proxy"))
+        self.kind.set_active_id("local")
+        mode = label(tr("Режим", "Mode"), "sshi-section")
+        mode.set_mnemonic_widget(self.kind)
+        choice = box(False, 14)
+        choice.add(mode)
+        choice.pack_start(self.kind, True, True, 0)
+        body.add(choice)
+
+        # Native, labelled icons remain visible in high-contrast and dark themes.
+        route = styled(Gtk.Grid(column_spacing=0, row_spacing=5), "sshi-route")
+        route.set_direction(Gtk.TextDirection.LTR)
+        body.add(route)
+        self.ends = []
+        self.arrows = []
+        for col, icon_name, name in [
+            (0, "computer-symbolic", tr("Этот компьютер", "This computer")),
+            (2, "network-wired-symbolic", "Iroh"),
+            (4, "network-server-symbolic", profile["name"]),
+        ]:
+            icon = Gtk.Image.new_from_icon_name(icon_name, Gtk.IconSize.DND)
+            icon.set_pixel_size(24 if col == 2 else 30)
+            styled(icon, "sshi-route-icon")
+            icon.set_halign(Gtk.Align.CENTER)
+            icon.set_valign(Gtk.Align.CENTER)
+            route.attach(icon, col, 0, 1, 1)
+            title = label(name, "sshi-section")
+            title.set_xalign(0.5)
+            title.set_max_width_chars(19)
+            title.set_tooltip_text(name)
+            route.attach(title, col, 1, 1, 1)
+            role = label("", "dim-label")
+            role.set_xalign(0.5)
+            route.attach(role, col, 2, 1, 1)
+            if col == 2:
+                role.set_text(tr("Туннель", "Tunnel"))
+                continue
+            detail = label("", "sshi-mono")
+            detail.set_xalign(0.5)
+            detail.set_width_chars(15)
+            detail.set_max_width_chars(24)
+            route.attach(detail, col, 3, 1, 1)
+            self.ends.append((role, detail))
+        for col in (1, 3):
+            lane = box(False, 0)
+            lane.set_valign(Gtk.Align.CENTER)
+            lane.set_hexpand(True)
+            lane.set_size_request(28, -1)
+            line = styled(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), "sshi-route-line")
+            line.set_valign(Gtk.Align.CENTER)
+            arrow = styled(Gtk.Label(label="▶"), "sshi-arrow")
+            lane.pack_start(line, True, True, 0)
+            lane.pack_end(arrow, False, False, 0)
+            route.attach(lane, col, 0, 1, 1)
+            self.arrows.append((lane, arrow))
+
+        form = Gtk.Grid(row_spacing=6, column_spacing=12)
+        form.set_column_homogeneous(False)
+        body.add(form)
+        self.bind_caption, self.bind_host, self.bind_port, _ = self.address_fields(form, 0, "8080")
+        self.target_caption, self.target_host, self.target_port, self.target_widgets = self.address_fields(form, 2, "80")
+        self.summary = label("", "sshi-section", wrap=True)
+        self.summary.set_selectable(True)
+        body.add(self.summary)
+        body.add(label(tr("Чтобы остановить проброс, закройте окно терминала.",
+                          "Close the terminal window to stop forwarding."), "dim-label", wrap=True))
+        self.previous_kind = "local"
+        for entry in (self.bind_host, self.bind_port, self.target_host, self.target_port):
+            entry.connect("changed", self.update)
+        self.kind.connect("changed", self.change_kind)
+        self.show_all()
+        self.update()
+
+    def address_fields(self, form, row, initial_port):
+        caption = label("", "sshi-section")
+        form.attach(caption, 0, row, 1, 1)
+        host = Gtk.Entry(text="127.0.0.1", hexpand=True)
+        host.set_max_length(255)
+        host.set_activates_default(True)
+        caption.set_mnemonic_widget(host)
+        form.attach(host, 0, row + 1, 1, 1)
+        port_title = label(tr("Порт", "Port"), "dim-label")
+        form.attach(port_title, 1, row, 1, 1)
+        port = Gtk.Entry(text=initial_port)
+        port.set_width_chars(7)
+        port.set_max_width_chars(7)
+        port.set_input_purpose(Gtk.InputPurpose.DIGITS)
+        port.set_activates_default(True)
+        port_title.set_mnemonic_widget(port)
+        form.attach(port, 1, row + 1, 1, 1)
+        return caption, host, port, (caption, host, port_title, port)
+
+    def change_kind(self, *_):
+        kind = self.kind.get_active_id()
+        old_default = "1080" if self.previous_kind == "dynamic" else "8080"
+        if self.bind_port.get_text() == old_default:
+            self.bind_port.set_text("1080" if kind == "dynamic" else "8080")
+        self.previous_kind = kind
+        self.update()
+
+    def update(self, *_):
+        kind = self.kind.get_active_id()
+        remote, dynamic = kind == "remote", kind == "dynamic"
+        listener = self.profile["name"] if remote else tr("Этот компьютер", "This computer")
+        service = tr("Этот компьютер", "This computer") if remote else self.profile["name"]
+        self.bind_caption.set_text(tr("Принимать подключения · {}", "Listen for connections · {}").format(listener))
+        self.target_caption.set_text(tr("Адрес сервиса · {}", "Service address · {}").format(service))
+        for host, port, caption in ((self.bind_host, self.bind_port, self.bind_caption),
+                                    (self.target_host, self.target_port, self.target_caption)):
+            host.get_accessible().set_name(caption.get_text())
+            port.get_accessible().set_name(tr("Порт · ", "Port · ") + caption.get_text())
+        for widget in self.target_widgets:
+            widget.set_visible(not dynamic)
+        for lane, arrow in self.arrows:
+            arrow.set_text("◀" if remote else "▶")
+            lane.set_direction(Gtk.TextDirection.RTL if remote else Gtk.TextDirection.LTR)
+
+        self.command = None
+        listen, target, error = "—", "—", ""
+        try:
+            listen = socket_address(self.bind_host.get_text(), self.bind_port.get_text())
+        except ValueError as exc:
+            error = tr("Приём подключений. ", "Listener. ") + str(exc)
+        if not dynamic:
+            try:
+                target = socket_address(self.target_host.get_text(), self.target_port.get_text())
+            except ValueError as exc:
+                error = error or (tr("Адрес сервиса. ", "Service address. ") + str(exc))
+        roles = [(tr("SOCKS5-прокси", "SOCKS5 proxy") if dynamic else tr("Слушает", "Listens"), listen),
+                 (tr("Открывает сервис", "Reaches service"),
+                  tr("Из запроса SOCKS", "From SOCKS request") if dynamic else target)]
+        for (role, detail), (text, address) in zip(self.ends, reversed(roles) if remote else roles):
+            role.set_text(text)
+            detail.set_text(address)
+            detail.set_tooltip_text(address)
+        self.set_response_sensitive(Gtk.ResponseType.OK, not error)
+        style = self.summary.get_style_context()
+        if error:
+            style.add_class("error")
+            self.summary.set_text(error)
+            return
+        style.remove_class("error")
+        open_address = listen
+        host = self.bind_host.get_text().strip().strip("[]")
+        try:
+            ip = ipaddress.ip_address(host)
+            if ip.is_unspecified:
+                open_address = socket_address("::1" if ip.version == 6 else "127.0.0.1", self.bind_port.get_text())
+        except ValueError:
+            pass
+        if remote:
+            message = tr("На «{}» подключитесь к {}.", "On “{}”, connect to {}.").format(listener, open_address)
+        elif dynamic:
+            message = tr("В настройках приложения на этом компьютере укажите SOCKS5-прокси {}.",
+                         "Set the SOCKS5 proxy in your app on this computer to {}.").format(open_address)
+        else:
+            message = tr("На этом компьютере подключитесь к {}.", "On this computer, connect to {}.").format(open_address)
+        self.summary.set_text(message)
+        self.command = ["forward", "--profile", self.profile["name"], "--kind", kind,
+                        "--bind-host", self.bind_host.get_text().strip(), "--bind-port", self.bind_port.get_text().strip()]
+        if not dynamic:
+            self.command.extend(["--target-host", self.target_host.get_text().strip(),
+                                 "--target-port", self.target_port.get_text().strip()])
 
 
 class Window(Gtk.Window):
@@ -118,31 +383,21 @@ class Window(Gtk.Window):
         brand.add(icon)
         brand.add(label("SSHI", "sshi-brand"))
         header.set_custom_title(brand)
-        header.pack_start(action("Подключение", lambda: self.edit(), "list-add-symbolic"))
-        menu = Gtk.Menu()
-        for text, callback in [
-            ("Недавние подключения…", self.history), ("Скопировать мой Endpoint ID", self.copy_id),
-            ("Настройки relay…", self.settings),
-            ("Экспорт подключений…", lambda: self.backup(False)),
-            ("Импорт подключений…", lambda: self.backup(True)),
-        ]:
-            item = Gtk.MenuItem(label=text)
-            item.connect("activate", lambda _, fn=callback: self.safe(fn))
-            menu.append(item)
-        menu.show_all()
-        menu_button = Gtk.MenuButton()
-        menu_button.set_image(Gtk.Image.new_from_icon_name("open-menu-symbolic", Gtk.IconSize.BUTTON))
-        menu_button.set_tooltip_text("Настройки, идентификатор и резервные копии")
-        menu_button.set_popup(menu)
-        header.pack_end(menu_button)
+        self.add_button = action("", lambda: self.edit(), "list-add-symbolic")
+        header.pack_start(self.add_button)
+        self.menu_button = Gtk.MenuButton()
+        self.menu_button.set_image(Gtk.Image.new_from_icon_name("open-menu-symbolic", Gtk.IconSize.BUTTON))
+        header.pack_end(self.menu_button)
 
         layout = Gtk.Paned.new(Gtk.Orientation.HORIZONTAL)
         self.add(layout)
         rail = styled(box(True, 10), "sshi-sidebar", "sidebar")
-        rail.add(label("Подключения", "sshi-section"))
-        self.search = Gtk.SearchEntry(placeholder_text="Поиск подключений")
+        self.sidebar_title = label("", "sshi-section")
+        rail.add(self.sidebar_title)
+        self.search = Gtk.SearchEntry()
         rail.pack_start(self.search, False, False, 0)
         self.listbox = Gtk.ListBox()
+        self.listbox.set_activate_on_single_click(False)
         self.listbox.set_selection_mode(Gtk.SelectionMode.SINGLE)
         self.listbox.set_filter_func(self.matches)
         scroll = Gtk.ScrolledWindow()
@@ -157,17 +412,53 @@ class Window(Gtk.Window):
         detail_scroll.add(self.detail)
         layout.pack2(detail_scroll, True, False)
         layout.set_position(260)
-        self.listbox.connect("row-selected", lambda _, row: self.show_profile(row.profile if row else None))
-        self.listbox.connect("row-activated", lambda _, row: self.connect_to(row.profile))
+        self.clicked_row = None
+        self.clicked_at = 0
+        self.rename_timer = 0
+        self.row_clicks = Gtk.GestureMultiPress.new(self.listbox)
+        self.row_clicks.set_button(Gdk.BUTTON_PRIMARY)
+        self.row_clicks.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        self.row_clicks.connect("pressed", self.row_pressed)
+        self.row_clicks.connect("released", self.row_released)
+        self.listbox.connect("row-selected", self.row_selected)
+        self.listbox.connect("row-activated", self.row_activated)
+        scroll.connect("scroll-event", self.reset_clicks)
         self.search.connect("search-changed", self.filter_rows)
+        self.connect("set-focus", self.focus_changed)
+        self.connect("focus-out-event", self.reset_clicks)
+        self.connect("unmap", self.reset_clicks)
         self.connect("key-press-event", self.keypress)
         self.connect("destroy", lambda *_: Gtk.main_quit() if Gtk.main_level() else None)
         self.profiles = []
-        self.show_profile(None)
+        self.refresh_language()
         if "--smoke-test" in sys.argv:
             self.reload()
         else:
             self.safe(self.reload)
+
+    def refresh_language(self):
+        self.add_button.set_label(tr("Подключение", "Connection"))
+        self.sidebar_title.set_text(tr("Подключения", "Connections"))
+        self.search.set_placeholder_text(tr("Поиск подключений", "Search connections"))
+        self.menu_button.set_tooltip_text(tr("Настройки, идентификатор и резервные копии",
+                                             "Settings, Endpoint ID and backups"))
+        menu = Gtk.Menu()
+        for text, callback in [
+            (tr("Недавние подключения…", "Recent connections…"), self.history), (tr("Скопировать мой Endpoint ID", "Copy my Endpoint ID"), self.copy_id),
+            (tr("Настройки…", "Settings…"), self.settings),
+            (tr("Экспорт подключений…", "Export connections…"), lambda: self.backup(False)),
+            (tr("Импорт подключений…", "Import connections…"), lambda: self.backup(True)),
+        ]:
+            item = Gtk.MenuItem(label=text)
+            item.connect("activate", lambda _, fn=callback: self.safe(fn))
+            menu.append(item)
+        menu.show_all()
+        previous = self.menu_button.get_popup()
+        self.menu_button.set_popup(menu)
+        if previous:
+            previous.destroy()
+        row = self.listbox.get_selected_row()
+        self.show_profile(row.profile if row else None)
 
     def safe(self, callback):
         try:
@@ -177,9 +468,10 @@ class Window(Gtk.Window):
             return None
 
     def message(self, text, error=False):
-        dialog = Gtk.MessageDialog(transient_for=self, modal=True, buttons=Gtk.ButtonsType.CLOSE,
+        dialog = Gtk.MessageDialog(transient_for=self, modal=True, buttons=Gtk.ButtonsType.NONE,
                                    message_type=Gtk.MessageType.ERROR if error else Gtk.MessageType.INFO,
                                    text=text)
+        dialog.add_button(tr("Закрыть", "Close"), Gtk.ResponseType.CLOSE)
         dialog.run()
         dialog.destroy()
 
@@ -188,10 +480,63 @@ class Window(Gtk.Window):
         return any(text in row.profile[k].casefold() for k in ("name", "user", "endpoint"))
 
     def filter_rows(self, *_):
+        self.reset_clicks()
         self.listbox.invalidate_filter()
         rows = [r for r in self.listbox.get_children() if r.get_child_visible()]
         if self.listbox.get_selected_row() not in rows:
             self.listbox.select_row(rows[0] if rows else None)
+
+    def cancel_rename(self):
+        if self.rename_timer:
+            GLib.source_remove(self.rename_timer)
+            self.rename_timer = 0
+
+    def reset_clicks(self, *_):
+        self.cancel_rename()
+        self.clicked_row = None
+        return False
+
+    def row_selected(self, _, row):
+        if row != self.clicked_row:
+            self.reset_clicks()
+        self.show_profile(row.profile if row else None)
+
+    def focus_changed(self, _, widget):
+        if widget != self.clicked_row:
+            self.reset_clicks()
+
+    def row_pressed(self, _, count, x, y):
+        self.cancel_rename()
+        self.press_xy = int(x), int(y)
+        self.press_time = GLib.get_monotonic_time() // 1000
+
+    def row_released(self, _, count, x, y):
+        row = self.listbox.get_row_at_y(int(y))
+        if (count != 1 or row is None or row != self.listbox.get_row_at_y(self.press_xy[1])
+                or self.listbox.drag_check_threshold(*self.press_xy, int(x), int(y))):
+            self.reset_clicks()
+            return
+        delay = self.get_settings().get_property("gtk-double-click-time")
+        if (row == self.clicked_row and row == self.listbox.get_selected_row()
+                and self.press_time - self.clicked_at > delay):
+            # A further press within GTK's double-click interval takes precedence.
+            self.rename_timer = GLib.timeout_add(delay, self.rename_after_click, row)
+        self.clicked_row = row
+        self.clicked_at = self.press_time
+
+    def rename_after_click(self, row):
+        self.rename_timer = 0
+        if row == self.clicked_row and row == self.listbox.get_selected_row():
+            self.rename(row.profile)
+        return GLib.SOURCE_REMOVE
+
+    def row_activated(self, _, row):
+        event = Gtk.get_current_event()
+        if (event and event.type in (Gdk.EventType.BUTTON_PRESS, Gdk.EventType.DOUBLE_BUTTON_PRESS,
+                                     Gdk.EventType.TOUCH_BEGIN) and self.clicked_row != row):
+            return  # Two close presses can land on opposite sides of a row boundary.
+        self.reset_clicks()
+        self.connect_to(row.profile)
 
     def reload(self, select=None):
         data = json.loads(cli("profile", "list", "--json"))
@@ -229,19 +574,19 @@ class Window(Gtk.Window):
             self.detail.remove(widget)
         add = lambda item: self.detail.pack_start(item, False, False, 0)
         if p is None:
-            add(label("Подключения", "sshi-title"))
-            add(label("По вашему запросу ничего не найдено." if self.profiles else
-                      "Сохраните имя, пользователя SSH и Endpoint ID удалённого компьютера.", wrap=True))
+            add(label(tr("Подключения", "Connections"), "sshi-title"))
+            add(label(tr("По вашему запросу ничего не найдено.", "No matching connections.") if self.profiles else
+                      tr("Сохраните имя, пользователя SSH и Endpoint ID удалённого компьютера.", "Save a name, SSH user and Endpoint ID for the remote computer."), wrap=True))
             if not self.profiles:
-                button = action("Новое подключение", lambda: self.edit(), "list-add-symbolic")
+                button = action(tr("Новое подключение", "New connection"), lambda: self.edit(), "list-add-symbolic")
                 button.set_halign(Gtk.Align.START)
                 add(styled(button, "suggested-action", "sshi-primary"))
         else:
             destination = p["user"] + "@" + p["endpoint"]
             add(label(p["name"], "sshi-title"))
             card = styled(Gtk.Grid(column_spacing=18, row_spacing=10), "sshi-card")
-            for index, (title, value) in enumerate([("SSH-логин", p["user"]), ("Endpoint ID", p["endpoint"]),
-                                                    ("Relay", p["relay"] or "Из настроек SSHI")]):
+            for index, (title, value) in enumerate([(tr("SSH-логин", "SSH user"), p["user"]), ("Endpoint ID", p["endpoint"]),
+                                                    ("Relay", p["relay"] or tr("Из настроек SSHI", "From SSHI settings"))]):
                 card.attach(label(title, "dim-label"), 0, index, 1, 1)
                 field = label(value, "sshi-mono", wrap=True)
                 field.set_hexpand(True)
@@ -249,19 +594,19 @@ class Window(Gtk.Window):
                 card.attach(field, 1, index, 1, 1)
             add(card)
             controls = box()
-            controls.add(styled(action("Открыть терминал", lambda: self.connect_to(p),
+            controls.add(styled(action(tr("Открыть терминал", "Open terminal"), lambda: self.connect_to(p),
                                        "utilities-terminal-symbolic"), "suggested-action", "sshi-primary"))
-            controls.add(action("Изменить", lambda: self.edit(p)))
+            controls.add(action(tr("Изменить", "Edit"), lambda: self.edit(p)))
             add(controls)
             add(Gtk.Separator())
             tools = Gtk.Grid(column_spacing=9, row_spacing=9)
             items = [
-                ("Ввести приглашение…", "mail-read-symbolic",
+                (tr("Ввести приглашение…", "Redeem invite…"), "mail-read-symbolic",
                  lambda: self.run_profile(p, ["copy-iid", "--invite", destination])),
-                ("Создать приглашение…", "mail-send-symbolic", lambda: self.invite(p)),
-                ("Установить SSH-ключ…", "changes-prevent-symbolic", lambda: self.ssh_key(p)),
-                ("Пробросить порт…", "network-wired-symbolic", lambda: self.forward(p)),
-                ("Токен этого relay…", "dialog-password-symbolic", lambda: self.profile_token(p)),
+                (tr("Создать приглашение…", "Create invite…"), "mail-send-symbolic", lambda: self.invite(p)),
+                (tr("Установить SSH-ключ…", "Install SSH key…"), "changes-prevent-symbolic", lambda: self.ssh_key(p)),
+                (tr("Пробросить порт…", "Forward a port…"), "network-wired-symbolic", lambda: self.forward(p)),
+                (tr("Токен этого relay…", "Token for this relay…"), "dialog-password-symbolic", lambda: self.profile_token(p)),
             ]
             for index, (caption, icon_name, callback) in enumerate(items):
                 button = styled(action(caption, callback, icon_name), "sshi-tool")
@@ -270,6 +615,15 @@ class Window(Gtk.Window):
         self.detail.show_all()
 
     def keypress(self, _, event):
+        self.reset_clicks()
+        row = self.listbox.get_selected_row()
+        if row is not None and self.get_focus() == row:
+            if event.keyval == Gdk.KEY_F2:
+                self.rename(row.profile)
+                return True
+            if event.keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
+                self.connect_to(row.profile)
+                return True
         if event.state & Gdk.ModifierType.CONTROL_MASK:
             if event.keyval in (Gdk.KEY_f, Gdk.KEY_F):
                 self.search.grab_focus()
@@ -279,22 +633,33 @@ class Window(Gtk.Window):
                 return True
         return False
 
-    def fields(self, title, rows, submit, remove=None, primary="Сохранить"):
-        dialog = Gtk.Dialog(title=title, transient_for=self, modal=True)
-        dialog.add_button("Отмена", Gtk.ResponseType.CANCEL)
-        dialog.add_button(primary, Gtk.ResponseType.OK)
+    def rename(self, profile):
+        self.reset_clicks()
+        def save(name):
+            cli("profile", "rename", "--name", profile["name"], "--to", name)
+            self.reload(name)
+        self.fields(tr("Переименовать подключение", "Rename connection"), [
+            (tr("Имя", "Name"), profile["name"], tr("Имя подключения", "Connection name"), False),
+        ], save, primary=tr("Переименовать", "Rename"))
+
+    def fields(self, title, rows, submit, remove=None, primary=None, parent=None):
+        dialog = Gtk.Dialog(title=title, transient_for=parent or self, modal=True)
+        dialog.add_button(tr("Отмена", "Cancel"), Gtk.ResponseType.CANCEL)
+        dialog.add_button(primary or tr("Сохранить", "Save"), Gtk.ResponseType.OK)
         dialog.set_default_response(Gtk.ResponseType.OK)
         grid = Gtk.Grid(column_spacing=14, row_spacing=12, margin=20)
         entries = []
         for i, (caption, initial, hint, secret) in enumerate(rows):
-            grid.attach(label(caption), 0, i, 1, 1)
+            title = label(caption)
+            grid.attach(title, 0, i, 1, 1)
             entry = Gtk.Entry(text=initial, placeholder_text=hint, visibility=not secret)
+            title.set_mnemonic_widget(entry)
             entry.set_width_chars(38)
             entry.set_activates_default(True)
             grid.attach(entry, 1, i, 1, 1)
             entries.append(entry)
         if remove:
-            dialog.add_button("Удалить…", Gtk.ResponseType.REJECT)
+            dialog.add_button(tr("Удалить…", "Delete…"), Gtk.ResponseType.REJECT)
         dialog.get_content_area().add(grid)
         dialog.show_all()
         while True:
@@ -322,18 +687,19 @@ class Window(Gtk.Window):
                 args.extend(["--relay", relay.strip()])
             cli(*args)
             self.reload(name.strip())
-        self.fields("Настройки подключения" if p else "Новое подключение", [
-            ("Имя", old.get("name", ""), "Рабочий сервер", False),
-            ("Пользователь SSH", old.get("user", ""), "user", False),
-            ("Endpoint ID", old.get("endpoint", ""), "64 символа", False),
-            ("Relay", old.get("relay", ""), "Из настроек SSHI", False),
+        self.fields(tr("Настройки подключения", "Connection settings") if p else tr("Новое подключение", "New connection"), [
+            (tr("Имя", "Name"), old.get("name", ""), tr("Рабочий сервер", "Work server"), False),
+            (tr("Пользователь SSH", "SSH user"), old.get("user", ""), "user", False),
+            ("Endpoint ID", old.get("endpoint", ""), tr("64 символа", "64 characters"), False),
+            ("Relay", old.get("relay", ""), tr("Из настроек SSHI", "From SSHI settings"), False),
         ], save, (lambda: self.remove(p)) if p else None)
 
     def remove(self, p):
-        dialog = Gtk.MessageDialog(transient_for=self, modal=True, buttons=Gtk.ButtonsType.CANCEL,
+        dialog = Gtk.MessageDialog(transient_for=self, modal=True, buttons=Gtk.ButtonsType.NONE,
                                    message_type=Gtk.MessageType.QUESTION,
-                                   text=f"Удалить подключение «{p['name']}»?")
-        dialog.add_button("Удалить", Gtk.ResponseType.OK)
+                                   text=tr("Удалить подключение «{}»?", "Delete connection “{}”?").format(p["name"]))
+        dialog.add_button(tr("Отмена", "Cancel"), Gtk.ResponseType.CANCEL)
+        dialog.add_button(tr("Удалить", "Delete"), Gtk.ResponseType.OK)
         answer = dialog.run()
         dialog.destroy()
         if answer == Gtk.ResponseType.OK:
@@ -345,19 +711,48 @@ class Window(Gtk.Window):
         clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
         clipboard.set_text(endpoint, -1)
         clipboard.store()
-        self.message("Мой Endpoint ID скопирован.\n\n" + endpoint)
+        self.message(tr("Мой Endpoint ID скопирован.\n\n", "Your Endpoint ID was copied.\n\n") + endpoint)
 
     def settings(self):
+        dialog = Gtk.Dialog(title=tr("Настройки", "Settings"), transient_for=self, modal=True)
+        dialog.add_buttons(tr("Отмена", "Cancel"), Gtk.ResponseType.CANCEL,
+                           tr("Сохранить", "Save"), Gtk.ResponseType.OK)
+        dialog.set_default_response(Gtk.ResponseType.OK)
+        grid = Gtk.Grid(column_spacing=16, row_spacing=14, margin=20)
+        dialog.get_content_area().add(grid)
+        language_picker = Gtk.ComboBoxText()
+        language_picker.append("ru", "Русский")
+        language_picker.append("en", "English")
+        language_picker.set_active_id(language)
+        caption = label(tr("Язык приложения", "Application language"))
+        caption.set_mnemonic_widget(language_picker)
+        grid.attach(caption, 0, 0, 1, 1)
+        grid.attach(language_picker, 1, 0, 1, 1)
+        relay = action(tr("Настройки relay…", "Relay settings…"), lambda: self.safe(lambda: self.relay_settings(dialog)),
+                       "network-server-symbolic")
+        grid.attach(relay, 0, 1, 2, 1)
+        release = Gtk.LinkButton.new_with_label(RELEASE_URL, tr("Что нового в 0.2.1", "What’s new in 0.2.1"))
+        release.set_halign(Gtk.Align.START)
+        grid.attach(release, 0, 2, 2, 1)
+        dialog.show_all()
+        accepted = dialog.run() == Gtk.ResponseType.OK
+        selected = language_picker.get_active_id()
+        dialog.destroy()
+        if accepted and selected != language:
+            save_language(selected)
+            self.refresh_language()
+
+    def relay_settings(self, dialog):
         current = json.loads(cli("config", "show", "--json"))
         def save(relay, token):
             if token:
                 cli("config", "set-token", "--relay", relay, stdin=token + "\n")
             if relay != (current.get("relay_url") or ""):
                 cli("config", "set-relay", relay)
-        self.fields("Настройки relay", [
-            ("Relay по умолчанию", current.get("relay_url") or "", "https://relay.example.org/", False),
-            ("Заменить токен", "", "Оставить текущий", True),
-        ], save)
+        self.fields(tr("Настройки relay", "Relay settings"), [
+            (tr("Relay по умолчанию", "Default relay"), current.get("relay_url") or "", "https://relay.example.org/", False),
+            (tr("Заменить токен", "Replace token"), "", tr("Оставить текущий", "Keep current token"), True),
+        ], save, parent=dialog)
 
     def profile_token(self, p):
         def save(token):
@@ -365,17 +760,17 @@ class Window(Gtk.Window):
             if p["relay"]:
                 args.extend(["--relay", p["relay"]])
             cli(*args, stdin=token + "\n")
-        self.fields("Токен relay", [
-            ("Новый токен", "", p["relay"] or "Relay из настроек SSHI", True),
+        self.fields(tr("Токен relay", "Relay token"), [
+            (tr("Новый токен", "New token"), "", p["relay"] or tr("Relay из настроек SSHI", "Relay from SSHI settings"), True),
         ], save)
 
     def history(self):
         recent = cli("list").splitlines()
         if not recent:
-            self.message("История пока пуста. Здесь появятся успешные SSH-подключения.")
+            self.message(tr("История пока пуста. Здесь появятся успешные SSH-подключения.", "Successful SSH connections will appear here."))
             return
-        dialog = Gtk.Dialog(title="Недавние подключения", transient_for=self, modal=True)
-        dialog.add_buttons("Отмена", Gtk.ResponseType.CANCEL, "Сохранить как профиль…", Gtk.ResponseType.OK)
+        dialog = Gtk.Dialog(title=tr("Недавние подключения", "Recent connections"), transient_for=self, modal=True)
+        dialog.add_buttons(tr("Отмена", "Cancel"), Gtk.ResponseType.CANCEL, tr("Сохранить как профиль…", "Save as connection…"), Gtk.ResponseType.OK)
         listed = Gtk.ListBox()
         for destination in recent:
             row = Gtk.ListBoxRow()
@@ -410,10 +805,10 @@ class Window(Gtk.Window):
             if owner:
                 args.extend(["--service-user", owner])
             open_terminal(args, True)
-        self.fields("Создать приглашение", [
-            ("Endpoint ID нового ПК", "", "64 символа", False),
-            ("Пользователь службы", "", p["user"], False),
-        ], issue, primary="Создать")
+        self.fields(tr("Создать приглашение", "Create invite"), [
+            (tr("Endpoint ID нового ПК", "New computer’s Endpoint ID"), "", tr("64 символа", "64 characters"), False),
+            (tr("Пользователь службы", "Service user"), "", p["user"], False),
+        ], issue, primary=tr("Создать", "Create"))
 
     def ssh_key(self, p):
         def install(path):
@@ -421,26 +816,24 @@ class Window(Gtk.Window):
             if path:
                 args.extend(["-i", os.path.expanduser(path)])
             self.run_profile(p, [*args, p["user"] + "@" + p["endpoint"]])
-        self.fields("Установить SSH-ключ", [
-            ("Публичный ключ", "", "~/.ssh/id_ed25519.pub", False),
-        ], install, primary="Установить")
+        self.fields(tr("Установить SSH-ключ", "Install SSH key"), [
+            (tr("Публичный ключ", "Public key"), "", "~/.ssh/id_ed25519.pub", False),
+        ], install, primary=tr("Установить", "Install"))
 
     def forward(self, p):
-        def start(flag, rule):
-            if flag not in ("L", "R", "D") or not rule.strip():
-                raise ValueError("Укажите тип L, R или D и адрес для проброса.")
-            self.run_profile(p, ["-N", "-" + flag, rule, p["user"] + "@" + p["endpoint"]])
-        self.fields("Проброс порта", [
-            ("Тип (L, R, D)", "L", "", False),
-            ("Правило OpenSSH", "", "127.0.0.1:8080:127.0.0.1:80", False),
-        ], start, primary="Открыть туннель")
+        dialog = ForwardDialog(self, p)
+        accepted = dialog.run() == Gtk.ResponseType.OK
+        command = dialog.command
+        dialog.destroy()
+        if accepted and command:
+            self.safe(lambda: open_terminal(command, False))
 
     def backup(self, restore):
         dialog = Gtk.FileChooserDialog(
-            title="Импорт подключений" if restore else "Экспорт подключений", transient_for=self,
+            title=tr("Импорт подключений", "Import connections") if restore else tr("Экспорт подключений", "Export connections"), transient_for=self,
             action=Gtk.FileChooserAction.OPEN if restore else Gtk.FileChooserAction.SAVE)
-        dialog.add_buttons("Отмена", Gtk.ResponseType.CANCEL,
-                           "Импортировать" if restore else "Сохранить", Gtk.ResponseType.OK)
+        dialog.add_buttons(tr("Отмена", "Cancel"), Gtk.ResponseType.CANCEL,
+                           tr("Импортировать", "Import") if restore else tr("Сохранить", "Save"), Gtk.ResponseType.OK)
         if not restore:
             dialog.set_current_name("sshi-connections.json")
         accepted = dialog.run() == Gtk.ResponseType.OK
@@ -450,7 +843,7 @@ class Window(Gtk.Window):
             cli("restore" if restore else "backup", path)
             if restore:
                 self.reload()
-            self.message("Подключения импортированы." if restore else "Резервная копия сохранена.")
+            self.message(tr("Подключения импортированы.", "Connections imported.") if restore else tr("Резервная копия сохранена.", "Backup saved."))
 
 
 def main():

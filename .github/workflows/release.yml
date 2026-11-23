@@ -61,7 +61,8 @@ jobs:
             --mount "type=bind,source=$PWD/dist,target=/dist" \
             archlinux@sha256:fa2d4ce3310ddd90a4208e5168be8ad367da5129af1245f38fd2d803bcbe3239 bash -euc '
               useradd -m builder
-              runuser -u builder -- bash /build-arch.sh /dist/*_amd64.deb /tmp/packages
+              install -m644 /dist/*_amd64.deb /tmp/sshi-input.deb
+              runuser -u builder -- bash /build-arch.sh /tmp/sshi-input.deb /tmp/packages
               pkg=(/tmp/packages/*.pkg.tar.zst)
               pacman --noconfirm -Udd "${pkg[0]}"
               test "$(sshi --version)" = "sshi $(pacman -Q sshi | cut -d" " -f2 | cut -d- -f1)"

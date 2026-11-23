@@ -7,11 +7,13 @@ import locale
 import os
 from pathlib import Path
 import re
+import select
 import shutil
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 from urllib.parse import urlsplit
 
 try:
@@ -27,7 +29,7 @@ if not os.path.isfile(SSHI):
     SSHI = shutil.which("sshi") or "sshi"
 
 LANGUAGE_FILE = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "sshi/desktop-language"
-RELEASE_URL = "https://github.com/gadmin2151/sshi/releases/tag/v0.2.3"
+RELEASE_URL = "https://github.com/gadmin2151/sshi/releases/tag/v0.2.4"
 
 
 def read_language():
@@ -149,14 +151,17 @@ def background(work, completed):
     threading.Thread(target=run, daemon=True).start()
 
 
-def open_terminal(args, hold):
+def open_terminal(args, hold, report_dir=None):
     wrapper = (
         'hold=$1; prompt=$2; shift 2; "$@"; result=$?; '
         'if [ "$hold" = yes ] || [ "$result" != 0 ]; then '
         'printf "\\n%s" "$prompt"; read -r answer; fi; exit "$result"'
     )
+    program = [SSHI, *args]
+    if report_dir:
+        program = [sys.executable, str(Path(__file__).resolve()), "--report-socket-start", str(report_dir), args[-1]]
     command = ["/bin/sh", "-c", wrapper, "sshi-terminal", "yes" if hold else "no",
-               tr("Нажмите Enter, чтобы закрыть окно.", "Press Enter to close this window."), SSHI, *args]
+               tr("Нажмите Enter, чтобы закрыть окно.", "Press Enter to close this window."), *program]
     launchers = [
         ("x-terminal-emulator", "-e"), ("xdg-terminal-exec",),
         ("ptyxis", "--new-window", "--"), ("kgx", "-e"), ("gnome-terminal", "--window", "--"),
@@ -166,9 +171,86 @@ def open_terminal(args, hold):
     for executable, *options in launchers:
         path = shutil.which(executable)
         if path:
-            subprocess.Popen([path, *options, *command], start_new_session=True)
-            return
+            return subprocess.Popen([path, *options, *command], start_new_session=True)
     raise ValueError(tr("Установите эмулятор терминала, например Konsole или xterm.", "Install a terminal emulator such as Konsole or xterm."))
+
+
+def report_terminal(directory, program):
+    # stdin and stdout stay on the real terminal. A second tty mirrors only
+    # diagnostics so prompts use /dev/tty and typed passwords are never logged.
+    import errno
+    import termios
+    try:
+        directory_fd = os.open(directory, os.O_DIRECTORY | os.O_NOFOLLOW)
+        meta = os.fstat(directory_fd)
+        if meta.st_uid != os.geteuid() or meta.st_mode & 0o077:
+            os.close(directory_fd)
+            directory_fd = None
+    except FileNotFoundError:
+        directory_fd = None  # The user dismissed the dialog; the login continues.
+
+    def publish(name, content):
+        if directory_fd is None:
+            return
+        # Anchor writes to the original private directory even if the window
+        # closed and another process recreated its former name in /tmp.
+        try:
+            fd = os.open("pending", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                         mode=0o600, dir_fd=directory_fd)
+            with os.fdopen(fd, "w", encoding="utf-8") as temp:
+                temp.write(content)
+            os.rename("pending", name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+        except FileNotFoundError:
+            pass
+
+    publish("started", str(os.getpid()))
+    reader, writer = os.openpty()
+    tail = bytearray()
+    try:
+        attrs = termios.tcgetattr(writer)
+        attrs[1] &= ~termios.OPOST
+        termios.tcsetattr(writer, termios.TCSANOW, attrs)
+        try:
+            process = subprocess.Popen(program, stderr=writer)
+        finally:
+            os.close(writer)
+        # A detached master might retain stderr. Stop on process completion
+        # after draining available bytes, without waiting for its descendants.
+        while True:
+            running = process.poll() is None
+            if not select.select([reader], [], [], 0.15 if running else 0)[0]:
+                if running:
+                    continue
+                break
+            try:
+                chunk = os.read(reader, 8192)
+            except OSError as error:
+                if error.errno != errno.EIO:
+                    raise
+                break  # All slave tty descriptors have been closed.
+            if not chunk:
+                break
+            os.write(2, chunk)
+            tail[:] = (tail + chunk)[-4096:]
+        code = process.wait()
+    except OSError as error:
+        code = 1
+        tail.extend(str(error).encode())
+        print(error, file=sys.stderr)
+    except KeyboardInterrupt:
+        code = 130
+    finally:
+        os.close(reader)
+    detail = ""
+    if code:
+        clean = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", tail.decode(errors="replace"))
+        detail = "".join(c for c in clean if c.isprintable() or c in "\n\t").strip()
+    try:
+        publish("result.json", json.dumps([code, detail]))
+    finally:
+        if directory_fd is not None:
+            os.close(directory_fd)
+    return code if code >= 0 else 128 - code
 
 
 def socket_address(host, port):
@@ -200,6 +282,14 @@ class ControlSocketDialog(Gtk.Dialog):
     def __init__(self, parent, name, path, command):
         super().__init__(title=tr("SSH-сокет", "SSH control socket"), transient_for=parent, modal=True)
         self.name = name
+        self.path = path
+        self.errors = parent.socket_errors
+        self.report = None
+        self.timer = 0
+        self.checking = False
+        self.disposed = False
+        self.active = False
+        self.connect("destroy", self.dispose)
         self.set_default_size(535, -1)
         self.add_button(tr("Готово", "Done"), Gtk.ResponseType.CLOSE)
         body = box(True, 12)
@@ -208,7 +298,9 @@ class ControlSocketDialog(Gtk.Dialog):
         body.add(label(name, "sshi-section", wrap=True))
         body.add(label(tr("Запустите сокет и войдите через терминал. Затем передайте команду Codex или выполните её в другом окне.",
                           "Start the socket and sign in through the terminal. Then give the command to Codex or run it in another window."), wrap=True))
-        self.status = label("", wrap=True)
+        self.status = label(tr("Проверяем сокет…", "Checking socket…"), "sshi-section", wrap=True)
+        self.status.set_selectable(True)
+        body.add(self.status)
         for title, caption, value in (
             (tr("Путь на этом компьютере", "Path on this computer"), tr("Скопировать путь", "Copy path"), path),
             (tr("Команда SSH", "SSH command"), tr("Скопировать команду", "Copy command"), command),
@@ -224,28 +316,106 @@ class ControlSocketDialog(Gtk.Dialog):
         row = box()
         self.start_button = styled(action(tr("Запустить", "Start socket"), self.start), "suggested-action")
         row.add(self.start_button)
-        row.add(action(tr("Проверить", "Check status"), lambda: self.control("check")))
-        row.add(action(tr("Остановить…", "Stop socket…"), self.confirm_stop))
+        self.check_button = action(tr("Проверить", "Check status"), self.check)
+        self.stop_button = action(tr("Остановить…", "Stop socket…"), self.confirm_stop)
+        row.add(self.check_button)
+        row.add(self.stop_button)
         body.add(row)
         body.add(label(tr("По умолчанию сокет закрывается после 11 ч 40 мин без активных сеансов.",
                           "By default, the socket closes after 11 hours and 40 minutes without an active session."), wrap=True))
-        self.controls = row
-        body.add(self.status)
+        self.feedback = label("", wrap=True)
+        body.add(self.feedback)
+        self.details = Gtk.Expander(label=tr("Подробности последней ошибки", "Last error details"))
+        self.details.set_no_show_all(True)
+        self.detail_text = label("", "sshi-mono", wrap=True)
+        self.detail_text.set_selectable(True)
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroll.set_size_request(-1, 90)
+        scroll.add(self.detail_text)
+        self.details.add(scroll)
+        scroll.show_all()
+        body.add(self.details)
         self.show_all()
+        if path in self.errors:
+            self.detail_text.set_text(self.errors[path])
+            self.details.show()
+        self.check()
 
     def copy(self, value):
         clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
         clipboard.set_text(value, -1)
         clipboard.store()
-        self.status.set_text(tr("Скопировано.", "Copied."))
+        self.feedback.set_text(tr("Скопировано.", "Copied."))
+
+    def buttons(self):
+        self.start_button.set_sensitive(not self.checking and not self.active and self.report is None)
+        self.stop_button.set_sensitive(not self.checking and self.active)
+        self.check_button.set_sensitive(not self.checking)
+
+    def show_error(self, summary, detail):
+        self.status.set_text(summary)
+        self.errors[self.path] = detail
+        self.detail_text.set_text(detail)
+        self.details.set_expanded(True)
+        self.details.show()
+
+    def end_monitor(self):
+        if self.timer:
+            GLib.source_remove(self.timer)
+            self.timer = 0
+        if self.report:
+            self.report.cleanup()
+            self.report = None
+
+    def dispose(self, *_):
+        self.disposed = True
+        self.end_monitor()
 
     def start(self):
+        if self.report or self.checking or self.active:
+            return
         try:
-            open_terminal(["socket", "start", "--", self.name], False)
-            self.status.set_text(tr("Завершите вход в терминале, затем нажмите «Проверить».",
-                                    "Complete sign-in in the terminal, then select Check status."))
+            self.report = tempfile.TemporaryDirectory(prefix="sshi-start-")
+            self.started_at = time.monotonic()
+            self.final_check = False
+            self.details.set_expanded(False)
+            self.launcher = open_terminal(["socket", "start", "--", self.name], False, self.report.name)
+            self.status.set_text(tr("Запускаем SSH в терминале…", "Starting SSH in the terminal…"))
+            self.timer = GLib.timeout_add_seconds(1, self.poll)
+            self.check()
         except (OSError, ValueError, subprocess.SubprocessError) as error:
-            self.status.set_text(str(error))
+            self.end_monitor()
+            self.show_error(tr("Не удалось открыть терминал.", "Could not open the terminal."), str(error))
+            self.buttons()
+
+    def poll(self):
+        if not self.disposed and self.report:
+            self.check()
+        return GLib.SOURCE_CONTINUE if self.timer else GLib.SOURCE_REMOVE
+
+    def start_result(self):
+        directory = Path(self.report.name)
+        try:
+            return json.loads((directory / "result.json").read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            pass
+        marker = directory / "started"
+        if marker.exists():
+            pid = marker.read_text().strip()
+            if pid:
+                try:
+                    os.kill(int(pid), 0)
+                except ProcessLookupError:
+                    # It may have published its result between our two reads.
+                    result = directory / "result.json"
+                    if result.exists():
+                        return json.loads(result.read_text())
+                    return 1, tr("Окно терминала закрылось до завершения SSH.", "The terminal closed before SSH finished.")
+            return None
+        if self.launcher.poll() not in (None, 0) or time.monotonic() - self.started_at >= 15:
+            return 1, tr("Терминал не запустил команду SSHI.", "The terminal did not start the SSHI command.")
+        return None
 
     def confirm_stop(self):
         prompt = Gtk.MessageDialog(transient_for=self, modal=True, buttons=Gtk.ButtonsType.NONE,
@@ -258,23 +428,59 @@ class ControlSocketDialog(Gtk.Dialog):
         accepted = prompt.run() == Gtk.ResponseType.OK
         prompt.destroy()
         if accepted:
-            self.control("close")
+            self.check("close")
 
-    def control(self, operation):
-        self.controls.set_sensitive(False)
+    def check(self, operation="check"):
+        if self.checking or self.disposed:
+            return
+        self.checking = True
+        self.buttons()
         def finished(_, error):
-            if self.get_visible():
-                self.controls.set_sensitive(True)
-                if error and "no active ssh control socket" in error.lower():
-                    message = tr("Сокет не запущен.", "The socket is stopped.")
-                elif error:
-                    message = error
-                elif operation == "check":
-                    message = tr("Сокет готов. Можно использовать команду SSH.", "The socket is ready. You can use the SSH command.")
-                else:
-                    message = tr("Сокет остановлен.", "The socket is stopped.")
-                self.status.set_text(message)
+            if self.disposed:
+                return
+            self.checking = False
+            self.active = not error and operation == "check"
+            stopped = error and "no active ssh control socket" in error.lower()
+            if self.active:
+                self.end_monitor()
+                self.status.set_text(tr("Сокет готов. Нажмите «Скопировать команду» для Codex или другого терминала.",
+                                        "The socket is ready. Select Copy command for Codex or another terminal."))
+            elif self.report:
+                self.update_start(error if not stopped else None)
+            elif error and not stopped:
+                self.show_error(tr("Не удалось проверить сокет.", "Could not check the socket.") if operation == "check" else
+                                tr("Не удалось остановить сокет.", "Could not stop the socket."), error)
+            else:
+                self.status.set_text(tr("Сокет не запущен.", "The socket is stopped."))
+            self.buttons()
         background(lambda: cli("socket", operation, "--", self.name), finished)
+
+    def update_start(self, check_error):
+        try:
+            result = self.start_result()
+        except (OSError, ValueError) as error:
+            result = 1, str(error)
+        if result is not None:
+            code, detail = result
+            if code == 0 and not self.final_check:
+                # The poll may have observed a missing socket just before the
+                # terminal finished authentication. Confirm once after success.
+                self.final_check = True
+                GLib.idle_add(self.check)
+                return
+            self.end_monitor()
+            summary = (tr("SSH завершился с кодом {}.", "SSH exited with status {}.").format(code) if code else
+                       tr("SSH завершил запуск, но сокет недоступен.", "SSH finished starting, but the socket is unavailable."))
+            self.show_error(summary, detail or check_error or summary)
+        elif time.monotonic() - self.started_at >= 180:
+            if self.timer:
+                GLib.source_remove(self.timer)
+                self.timer = 0
+            self.status.set_text(tr("Завершите вход в терминале и нажмите «Проверить».",
+                                    "Finish signing in through the terminal, then select Check status."))
+        else:
+            self.status.set_text(tr("Ожидаем SSH. Если терминал запросит пароль, введите его там.",
+                                    "Waiting for SSH. If the terminal asks for a password, enter it there."))
 
 
 class ForwardDialog(Gtk.Dialog):
@@ -751,6 +957,7 @@ class Window(Gtk.Window):
         self.add_button = action("", lambda: self.edit(), "list-add-symbolic")
         header.pack_start(self.add_button)
         self.update_info = None
+        self.socket_errors = {}
         self.update_error = None
         self.checking_update = False
         self.update_settings = None
@@ -1173,7 +1380,7 @@ class Window(Gtk.Window):
         relay = action(tr("Настройки relay…", "Relay settings…"), lambda: self.safe(lambda: self.relay_settings(dialog)),
                        "network-server-symbolic")
         grid.attach(relay, 0, 1, 2, 1)
-        release = Gtk.LinkButton.new_with_label(RELEASE_URL, tr("Что нового в 0.2.3", "What’s new in 0.2.3"))
+        release = Gtk.LinkButton.new_with_label(RELEASE_URL, tr("Что нового в 0.2.4", "What’s new in 0.2.4"))
         release.set_halign(Gtk.Align.START)
         grid.attach(release, 0, 2, 2, 1)
         check = action(tr("Проверить обновления", "Check for updates"), self.check_updates)
@@ -1357,4 +1564,6 @@ def main():
 
 
 if __name__ == "__main__":
+    if len(sys.argv) == 4 and sys.argv[1] == "--report-socket-start":
+        sys.exit(report_terminal(sys.argv[2], [SSHI, "socket", "start", "--", sys.argv[3]]))
     main()

@@ -200,6 +200,8 @@ enum Action {
         endpoint: EndpointId,
         #[arg(long)]
         invite_user: Option<String>,
+        #[arg(long, conflicts_with = "invite_user")]
+        background_master: bool,
     },
     #[command(name = "__broker", hide = true)]
     Broker,
@@ -320,11 +322,23 @@ fn main() -> Result<()> {
         Some(Action::Proxy {
             endpoint,
             invite_user,
-        }) => run_async(proxy::connect(
-            State::load()?,
-            endpoint,
-            invite_user.as_deref(),
-        )),
+            background_master,
+        }) => {
+            if background_master {
+                // OpenSSH forks its master after authentication. Its proxy was forked
+                // earlier and otherwise still receives hangups from the login terminal.
+                // setsid preserves OpenSSH's pipes and its ability to signal us directly.
+                if unsafe { libc::setsid() } == -1 {
+                    return Err(io::Error::last_os_error())
+                        .context("detach SSH master proxy from its terminal");
+                }
+            }
+            run_async(proxy::connect(
+                State::load()?,
+                endpoint,
+                invite_user.as_deref(),
+            ))
+        }
         Some(Action::Broker) => run_async(proxy::broker(State::load()?)),
         Some(Action::Record { destination }) => State::load()?.record(&destination.to_string()),
         None => login(&cli),
@@ -356,15 +370,28 @@ fn login_command(cli: &Cli) -> Result<Process> {
     let exe = quoted_sshi_executable()?;
     let record = ssh_shell_arg(&destination.to_string());
 
-    let invite_user = (cli.interactive_shell()
+    let proxy_mode = if cli.master
+        && (cli.background
+            || (cli.no_command
+                && cli
+                    .persist
+                    .as_ref()
+                    .is_some_and(|p| !p.eq_ignore_ascii_case("no"))))
+    {
+        ProxyMode::BackgroundMaster
+    } else if cli.interactive_shell()
         && io::stdin().is_terminal()
         && io::stdout().is_terminal()
-        && io::stderr().is_terminal())
-    .then_some(destination.user.as_str());
+        && io::stderr().is_terminal()
+    {
+        ProxyMode::Invite(&destination.user)
+    } else {
+        ProxyMode::Standard
+    };
     let mut ssh = ssh_over_iroh(
         destination.endpoint,
         &exe,
-        invite_user,
+        proxy_mode,
         cli.control_path.as_deref(),
     );
     if let Some(profile) = profile {
@@ -471,17 +498,27 @@ fn control_persist(option: &str) -> Result<String, String> {
     Ok(value.to_owned())
 }
 
+enum ProxyMode<'a> {
+    Standard,
+    Invite(&'a str),
+    BackgroundMaster,
+}
+
 fn ssh_over_iroh(
     endpoint: EndpointId,
     exe: &str,
-    invite_user: Option<&str>,
+    mode: ProxyMode<'_>,
     control_path: Option<&Path>,
 ) -> Process {
     let mut ssh = Process::new("ssh");
     let mut proxy = format!("ProxyCommand={exe} __proxy {endpoint}");
-    if let Some(user) = invite_user {
-        proxy.push_str(" --invite-user ");
-        proxy.push_str(&ssh_shell_arg(user));
+    match mode {
+        ProxyMode::Standard => {}
+        ProxyMode::BackgroundMaster => proxy.push_str(" --background-master"),
+        ProxyMode::Invite(user) => {
+            proxy.push_str(" --invite-user ");
+            proxy.push_str(&ssh_shell_arg(user));
+        }
     }
     if let Some(path) = control_path {
         ssh.arg("-S").arg(path);
@@ -528,14 +565,16 @@ mod control_tests {
             assert!(args.contains(&flag));
         }
         assert!(!args.contains(&"ControlPath=none"));
-        assert!(
-            args.iter()
-                .any(|s| s.starts_with("ProxyCommand=")
-                    && s.ends_with(&format!("__proxy {endpoint}")))
-        );
+        assert!(args.iter().any(|s| s.starts_with("ProxyCommand=")
+            && s.ends_with(&format!("__proxy {endpoint} --background-master"))));
         assert!(args.contains(&format!("HostKeyAlias={endpoint}").as_str()));
 
         let cli = Cli::try_parse_from(["sshi", &target])?;
+        assert!(
+            !login_command(&cli)?
+                .get_args()
+                .any(|a| a.to_string_lossy().contains("--background-master"))
+        );
         assert!(
             login_command(&cli)?
                 .get_args()

@@ -49,7 +49,7 @@ struct TestProfileClicks {
         precondition(AppLanguage.current(in: defaults) == .russian)
         defaults.set("en", forKey: AppLanguage.preferenceKey)
         let restored = AppLanguage.current(in: UserDefaults(suiteName: suite)!)
-        precondition(restored == .english && restored.whatsNew == "What’s new in 0.2.3")
+        precondition(restored == .english && restored.whatsNew == "What’s new in 0.2.4")
         precondition(ForwardKind.remote.title(restored) == "Access from there")
         precondition(AppLanguage.russian.commandError("Error: duplicate connection name 'old'").contains("уже существует"))
         precondition(restored.commandError("Error: invalid SSH username").contains("Check the SSH username"))

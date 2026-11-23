@@ -5,7 +5,9 @@ use clap::{Args, Parser};
 use iroh::EndpointId;
 use iroh_ssh::allow_client_command;
 
-use crate::{Destination, invitation_cli, quoted_sshi_executable, ssh_over_iroh, state::State};
+use crate::{
+    Destination, ProxyMode, invitation_cli, quoted_sshi_executable, ssh_over_iroh, state::State,
+};
 
 #[derive(Parser)]
 #[command(
@@ -59,8 +61,12 @@ pub fn run(copy: CopyIid) -> Result<()> {
                 copy.port.is_none(),
                 "-p is only for direct SSH destinations"
             );
-            let mut ssh =
-                ssh_over_iroh(destination.endpoint, &quoted_sshi_executable()?, None, None);
+            let mut ssh = ssh_over_iroh(
+                destination.endpoint,
+                &quoted_sshi_executable()?,
+                ProxyMode::Standard,
+                None,
+            );
             ssh.arg("-l").arg(destination.user);
             (ssh, destination.endpoint.to_string())
         }

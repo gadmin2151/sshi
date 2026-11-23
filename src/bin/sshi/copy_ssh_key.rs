@@ -11,7 +11,7 @@ use anyhow::{Context, Result, ensure};
 use clap::{Args, Parser};
 use iroh_ssh::install_ssh_key_command;
 
-use crate::{Destination, quoted_sshi_executable, ssh_over_iroh};
+use crate::{Destination, ProxyMode, quoted_sshi_executable, ssh_over_iroh};
 
 #[derive(Parser)]
 #[command(
@@ -52,7 +52,7 @@ pub fn run(copy: CopySshKey) -> Result<()> {
     }
 
     let exe = quoted_sshi_executable()?;
-    let mut ssh = ssh_over_iroh(copy.destination.endpoint, &exe, None, None);
+    let mut ssh = ssh_over_iroh(copy.destination.endpoint, &exe, ProxyMode::Standard, None);
     ssh.args([
         "-T",
         "-a",

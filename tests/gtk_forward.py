@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 def load_desktop(binary):
@@ -71,7 +71,7 @@ def check(binary, root):
         combo, = [widget for widget in children(dialog) if isinstance(widget, Gtk.ComboBoxText)]
         assert combo.get_active_id() == "ru"
         link, = [widget for widget in children(dialog) if isinstance(widget, Gtk.LinkButton)]
-        assert link.get_uri() == module.RELEASE_URL and link.get_label() == "Что нового в 0.2.3"
+        assert link.get_uri() == module.RELEASE_URL and link.get_label() == "Что нового в 0.2.4"
         combo.set_active_id("en")
         return Gtk.ResponseType.OK
 
@@ -160,7 +160,8 @@ def check(binary, root):
               "download_url": "https://github.com/gadmin2151/sshi/releases/download/v1.0.1/sshi_1.0.1_amd64.deb",
               "release_url": "https://github.com/gadmin2151/sshi/releases/tag/v1.0.1"}
     calls = []
-    stopped = False
+    stopped = True
+    report_dirs = []
 
     def fake_cli(*args, **kwargs):
         calls.append(args)
@@ -188,17 +189,34 @@ def check(binary, root):
     def socket_actions(dialog):
         nonlocal stopped
         assert dialog.get_title() == "SSH control socket" and len(launched) == 3
-        assert [args[1] for args in calls] == ["path", "command"]
+        assert [args[1] for args in calls] == ["path", "command", "check"]
+        assert dialog.status.get_text() == "The socket is stopped." and not dialog.stop_button.get_sensitive()
         assert any(isinstance(item, Gtk.Label) and item.get_text() == command for item in children(dialog))
         with patch.object(Gtk.Clipboard, "get") as clipboard:
             button(dialog, "Copy command").clicked()
             clipboard.return_value.set_text.assert_called_with(command, -1)
             button(dialog, "Copy path").clicked()
             clipboard.return_value.set_text.assert_called_with(path, -1)
-        button(dialog, "Check status").clicked()
-        assert "ready" in dialog.status.get_text() and len(launched) == 3
-        button(dialog, "Start socket").clicked()
+        def launch(args, hold, report_dir):
+            launched.append((args, hold))
+            directory = Path(report_dir)
+            report_dirs.append(directory)
+            assert directory.stat().st_mode & 0o077 == 0
+            (directory / "started").write_text(str(os.getpid()))
+            return Mock(poll=lambda: None)
+        with patch.object(module, "open_terminal", launch):
+            dialog.start_button.clicked()
+            assert dialog.report and dialog.timer and not dialog.start_button.get_sensitive()
+            (report_dirs[-1] / "result.json").write_text(json.dumps([255, "Permission denied (publickey)"]))
+            dialog.poll()
+            assert "255" in dialog.status.get_text() and dialog.report is None and not dialog.timer
+            assert dialog.details.get_visible() and "Permission denied" in dialog.detail_text.get_text()
+            dialog.start_button.clicked()
         assert launched[-1] == (["socket", "start", "--", profile], False)
+        stopped = False
+        dialog.poll()
+        assert "ready" in dialog.status.get_text() and not dialog.start_button.get_sensitive()
+        assert not report_dirs[-1].exists() and not dialog.timer
         with_dialog(button(dialog, "Stop socket…").clicked, lambda prompt: Gtk.ResponseType.CANCEL)
         assert calls[-1][1] == "check"
         with_dialog(button(dialog, "Stop socket…").clicked, lambda prompt: Gtk.ResponseType.OK)
@@ -206,6 +224,20 @@ def check(binary, root):
         stopped = True
         button(dialog, "Check status").clicked()
         assert dialog.status.get_text() == "The socket is stopped."
+        return Gtk.ResponseType.CLOSE
+
+    def reopened(dialog):
+        assert dialog.details.get_visible() and "Permission denied" in dialog.detail_text.get_text()
+        launches = len(launched)
+        with patch.object(module, "open_terminal", return_value=Mock(poll=lambda: None)):
+            dialog.start_button.clicked()
+            directory = Path(dialog.report.name)
+            (directory / "started").write_text(str(os.getpid()))
+            dialog.started_at -= 200
+            dialog.poll()
+            assert not dialog.timer and "then select Check status" in dialog.status.get_text()
+            report_dirs.append(directory)
+        assert launches == len(launched)
         return Gtk.ResponseType.CLOSE
 
     def update_actions(dialog):
@@ -231,7 +263,23 @@ def check(binary, root):
 
     with patch.object(module, "cli", fake_cli), patch.object(module, "background", complete):
         with_dialog(lambda: click_action("SSH control socket…"), socket_actions)
+        with_dialog(lambda: click_action("SSH control socket…"), reopened)
+        assert not any(directory.exists() for directory in report_dirs)
         with_dialog(lambda: setting("Settings…"), update_actions)
+    with tempfile.TemporaryDirectory(dir=root) as report:
+        code = module.report_terminal(report, [sys.executable, "-c",
+            "import os, sys; assert os.isatty(2); sys.stderr.write('Test SSH error\\n'); sys.exit(37)"])
+        assert code == 37 and json.loads((Path(report) / "result.json").read_text()) == [37, "Test SSH error"]
+        # Konsole passes the helper argv directly even for punctuation in profile names.
+        special_name = "Lab 'A'; $data"
+        launcher = load_desktop(binary)
+        with patch.object(launcher.shutil, "which", side_effect=lambda exe: "/usr/bin/konsole" if exe == "konsole" else None), \
+                patch.object(launcher.subprocess, "Popen") as spawned:
+            launcher.open_terminal(["socket", "start", "--", special_name], False, report)
+            argv = spawned.call_args.args[0]
+            assert argv[:4] == ["/usr/bin/konsole", "--separate", "-e", "/bin/sh"]
+            assert argv[-3:] == ["--report-socket-start", report, special_name]
+            assert spawned.call_args.kwargs == {"start_new_session": True}
     window.destroy()
     print("GTK settings, translations, port forwarding, control socket actions and update notifications passed")
 

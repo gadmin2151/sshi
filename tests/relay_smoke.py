@@ -7,6 +7,7 @@ import os
 import pathlib
 import re
 import shlex
+import signal
 import socket
 import subprocess
 import tempfile
@@ -83,6 +84,24 @@ def ready(process, logfile, marker):
         raise AssertionError(f"Process exited early: {text(logfile.read_bytes())}")
     return marker in logfile.read_bytes()
 
+def start_socket_from_terminal(profile, env):
+    child, terminal = os.forkpty()
+    if child == 0:
+        try:
+            os.execvpe("sshi", ["sshi", "socket", "start", "--", profile], env)
+        finally:
+            os._exit(127)
+    try:
+        wait_for(lambda: os.waitid(os.P_PID, child, os.WEXITED | os.WNOHANG | os.WNOWAIT),
+                 "socket start in its own controlling terminal", 35)
+    except BaseException:
+        os.kill(child, signal.SIGKILL)
+        raise
+    finally:
+        os.close(terminal)
+        _, status = os.waitpid(child, 0)
+    assert os.waitstatus_to_exitcode(status) == 0, "socket start failed in its terminal"
+
 def check_profile_socket(profile, destination, env, sshd_log):
     def action(name):
         return run(["sshi", "socket", name, profile], env=env)
@@ -103,12 +122,20 @@ def check_profile_socket(profile, destination, env, sshd_log):
         assert sshd_log.read_bytes().count(b"Accepted publickey for root ") == auth + 1
         check(action("close"), "close profile socket")
         wait_for(lambda: not path.exists(), "profile socket removal")
+        # Desktop clients close the authentication terminal as soon as start exits.
+        start_socket_from_terminal(profile, env)
+        check(action("check"), "master survived the authentication terminal closing")
+        assert check(run([*command, "printf after-terminal-close"], env=env),
+                     "use socket after the terminal closed") == b"after-terminal-close"
+        assert sshd_log.read_bytes().count(b"Accepted publickey for root ") == auth + 2
+        check(action("close"), "close background master after terminal exit")
+        wait_for(lambda: not path.exists(), "background socket removal")
         assert action("check").returncode != 0
         assert run([*command, "exit 0"], env=env).returncode != 0
     finally:
         if path.exists():
             action("close")
-    print("Profile socket inspection, concurrent start, one authenticated connection, native SSH and explicit close: pass", flush=True)
+    print("Profile socket inspection, shared login, surviving terminal closure, native SSH and explicit close: pass", flush=True)
 
 man_path = check(run(["man", "-w", "sshi"]), "find man sshi")
 assert b"/sshi.1.gz" in man_path

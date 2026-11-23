@@ -1,6 +1,6 @@
 # Сборка SSHI
 
-Версия пакетов берётся из `Cargo.toml`. Для выпуска 0.2.1 используется Rust 1.96 и зафиксированный `Cargo.lock`.
+Версия пакетов берётся из `Cargo.toml`. Для выпуска 0.2.2 используется Rust 1.96 и зафиксированный `Cargo.lock`.
 
 ## Linux
 
@@ -18,8 +18,8 @@ Docker Buildx собирает три DEB с glibc из Debian 11. Для RPM и
 
 ```sh
 docker buildx build --platform linux/amd64 -f packaging/Dockerfile --output type=local,dest=dist .
-sh packaging/build-rpm.sh dist/sshi_0.2.1_amd64.deb
-sh packaging/build-rpm.sh dist/sshi_0.2.1_arm64.deb
+sh packaging/build-rpm.sh dist/sshi_0.2.2_amd64.deb
+sh packaging/build-rpm.sh dist/sshi_0.2.2_arm64.deb
 ```
 
 ## Windows x64
@@ -53,7 +53,7 @@ Workflow в `.github/workflows/release.yml` собирает и проверяе
 
 ```sh
 cargo install --locked --version 1.5.0 --debug --features server iroh-relay
-tests/run-relay-smoke.sh dist/sshi_0.2.1_amd64.deb
+tests/run-relay-smoke.sh dist/sshi_0.2.2_amd64.deb
 ```
 
 Тест запускает отдельные SSH-сервер и relay, создаёт временные идентичности, активирует и отзывает приглашение, проверяет интерактивный вход, код возврата удалённой команды, параллельные сеансы и передачу данных через `-L`, `-R` и `-D`. Все три режима также проверяются через команду `sshi forward`, которую запускает графический клиент.
@@ -63,6 +63,7 @@ tests/run-relay-smoke.sh dist/sshi_0.2.1_amd64.deb
 ```sh
 xvfb-run -a /usr/bin/python3 tests/profile_clicks.py /usr/bin/sshi
 xvfb-run -a /usr/bin/python3 tests/gtk_forward.py /usr/bin/sshi
+xvfb-run -a /usr/bin/python3 tests/gtk_invitation.py /usr/bin/sshi
 ```
 
 На Apple Silicon выполните `bash desktop/macos/test-clicks.sh` в графическом сеансе.

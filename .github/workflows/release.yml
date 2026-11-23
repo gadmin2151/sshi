@@ -60,7 +60,7 @@ jobs:
           sudo apt-get install -y xvfb gir1.2-gtk-3.0 python3-gi ./dist/*_amd64.deb
           sshi --version
           xvfb-run -a sshi-desktop --smoke-test
-          for test in profile_clicks gtk_forward; do
+          for test in profile_clicks gtk_forward gtk_invitation; do
             if ! xvfb-run -a /usr/bin/python3 "tests/$test.py" /usr/bin/sshi > "$RUNNER_TEMP/gtk-test.log" 2>&1; then
               tail -15 "$RUNNER_TEMP/gtk-test.log" | while IFS= read -r line; do echo "::error::$line"; done
               exit 1

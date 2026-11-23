@@ -52,7 +52,7 @@ pub fn run(copy: CopySshKey) -> Result<()> {
     }
 
     let exe = quoted_sshi_executable()?;
-    let mut ssh = ssh_over_iroh(copy.destination.endpoint, &exe);
+    let mut ssh = ssh_over_iroh(copy.destination.endpoint, &exe, None);
     ssh.args([
         "-T",
         "-a",

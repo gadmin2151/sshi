@@ -14,7 +14,7 @@ cleanup() {
 }
 trap cleanup EXIT
 cp "$package" "$work/sshi.deb"
-cp "$here/relay_smoke.py" "$work"
+cp "$here/relay_smoke.py" "$here/login_pty.py" "$work"
 docker build --build-arg "BASE=${SSHI_SMOKE_IMAGE:-debian:bookworm-slim}" -q -t "$image" -f "$here/relay-smoke.Dockerfile" "$work"
 port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')
 printf 'http_bind_addr = "127.0.0.1:%s"\nenable_metrics = false\n' "$port" > "$work/relay.toml"

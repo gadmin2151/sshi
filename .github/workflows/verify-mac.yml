@@ -6,16 +6,16 @@ on:
         description: Published SSHI version (defaults to the version in Cargo.toml)
         type: string
         required: false
-  push:
+  workflow_run:
+    workflows: ["Build and test SSHI"]
+    types: [completed]
     branches: [main]
-    paths:
-      - .github/workflows/verify-mac.yml
-      - tests/mac_relay_smoke.py
 permissions:
   contents: read
 
 jobs:
   installed-package:
+    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.event == 'push' && github.event.workflow_run.conclusion == 'success' && startsWith(github.event.workflow_run.head_commit.message, 'Release SSHI '))
     runs-on: macos-15
     timeout-minutes: 25
     env:
@@ -23,6 +23,8 @@ jobs:
       REQUESTED_VERSION: ${{ inputs.version }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
       - name: Download and check the published installer
         env:
           GH_TOKEN: ${{ github.token }}

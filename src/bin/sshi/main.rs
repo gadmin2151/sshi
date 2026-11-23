@@ -1,7 +1,9 @@
 mod config;
 mod copy_iid;
 mod copy_ssh_key;
+mod invitation_cli;
 mod invitations;
+mod login_invite;
 mod profiles;
 mod proxy;
 mod state;
@@ -10,6 +12,7 @@ use std::{
     env,
     ffi::OsString,
     fmt,
+    io::{self, IsTerminal},
     net::SocketAddr,
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
@@ -122,6 +125,9 @@ enum Action {
         client: EndpointId,
         #[arg(long)]
         service_user: Option<String>,
+        /// Print a shareable link containing the receiver settings.
+        #[arg(long)]
+        share: bool,
     },
     /// Add an iroh Endpoint ID to a receiver over SSH or iroh.
     #[command(alias = "compi-id")]
@@ -131,7 +137,21 @@ enum Action {
     /// Add a trusted iroh Endpoint ID to this receiver's configuration.
     AllowClient { id: EndpointId },
     /// Issue a one-time iroh invitation for a specific client Endpoint ID.
-    Invite { id: EndpointId },
+    Invite {
+        id: EndpointId,
+        /// Include the receiver's SSH user, Endpoint ID and relay in a shareable link.
+        #[arg(long, requires = "user")]
+        share: bool,
+        #[arg(long, requires = "share")]
+        user: Option<String>,
+        #[arg(long, requires = "share")]
+        relay: Option<String>,
+    },
+    /// Inspect or redeem an invitation supplied on stdin.
+    Invitation {
+        #[command(subcommand)]
+        command: invitation_cli::Action,
+    },
     /// Revoke a pending invitation or its granted access for an Endpoint ID.
     RevokeInvite { id: EndpointId },
     /// Accept SSH connections and share the iroh endpoint with local sshi clients.
@@ -146,7 +166,11 @@ enum Action {
     #[command(name = "__install-key", hide = true)]
     InstallKey,
     #[command(name = "__proxy", hide = true)]
-    Proxy { endpoint: EndpointId },
+    Proxy {
+        endpoint: EndpointId,
+        #[arg(long)]
+        invite_user: Option<String>,
+    },
     #[command(name = "__broker", hide = true)]
     Broker,
     #[command(name = "__record", hide = true)]
@@ -239,15 +263,16 @@ fn main() -> Result<()> {
             name,
             client,
             service_user,
-        }) => profiles::invite(&name, client, service_user.as_deref()),
+            share,
+        }) => profiles::invite(&name, client, service_user.as_deref(), share),
         Some(Action::InstallKey) => iroh_ssh::install_ssh_key_locally(),
         Some(Action::CopyIid(copy)) => copy_iid::run(copy),
         Some(Action::CopyId(copy)) => copy_ssh_key::run(copy),
         Some(Action::AllowClient { id }) => Config::allow_client(id),
-        Some(Action::Invite { id }) => {
-            println!("{}", State::load()?.invitations()?.issue(id)?);
-            Ok(())
-        }
+        Some(Action::Invite {
+            id, user, relay, ..
+        }) => invitation_cli::issue(id, user.as_deref(), relay.as_deref()),
+        Some(Action::Invitation { command }) => invitation_cli::run(command),
         Some(Action::RevokeInvite { id }) => {
             if State::load()?.invitations()?.revoke(id)? {
                 println!("Revoked invitation access for {id}");
@@ -260,7 +285,14 @@ fn main() -> Result<()> {
             allow_client,
             target,
         }) => run_async(proxy::serve(State::load()?, allow_client, target)),
-        Some(Action::Proxy { endpoint }) => run_async(proxy::connect(State::load()?, endpoint)),
+        Some(Action::Proxy {
+            endpoint,
+            invite_user,
+        }) => run_async(proxy::connect(
+            State::load()?,
+            endpoint,
+            invite_user.as_deref(),
+        )),
         Some(Action::Broker) => run_async(proxy::broker(State::load()?)),
         Some(Action::Record { destination }) => State::load()?.record(&destination.to_string()),
         None => login(&cli),
@@ -275,7 +307,12 @@ fn login(cli: &Cli) -> Result<()> {
     let exe = quoted_sshi_executable()?;
     let record = ssh_shell_arg(&destination.to_string());
 
-    let mut ssh = ssh_over_iroh(destination.endpoint, &exe);
+    let invite_user = (cli.interactive_shell()
+        && io::stdin().is_terminal()
+        && io::stdout().is_terminal()
+        && io::stderr().is_terminal())
+    .then_some(destination.user.as_str());
+    let mut ssh = ssh_over_iroh(destination.endpoint, &exe, invite_user);
     // OpenSSH owns authentication, host keys, signals, port forwarding and the exit status.
     ssh.args(["-o", "PermitLocalCommand=yes"])
         .arg("-o")
@@ -331,10 +368,26 @@ fn quoted_sshi_executable() -> Result<String> {
     ))
 }
 
-fn ssh_over_iroh(endpoint: EndpointId, exe: &str) -> Process {
+impl Cli {
+    fn interactive_shell(&self) -> bool {
+        self.remote_command.is_empty()
+            && !self.no_tty
+            && !self.no_command
+            && self.local.is_empty()
+            && self.remote.is_empty()
+            && self.dynamic.is_empty()
+    }
+}
+
+fn ssh_over_iroh(endpoint: EndpointId, exe: &str, invite_user: Option<&str>) -> Process {
     let mut ssh = Process::new("ssh");
+    let mut proxy = format!("ProxyCommand={exe} __proxy {endpoint}");
+    if let Some(user) = invite_user {
+        proxy.push_str(" --invite-user ");
+        proxy.push_str(&ssh_shell_arg(user));
+    }
     ssh.arg("-o")
-        .arg(format!("ProxyCommand={exe} __proxy {endpoint}"))
+        .arg(proxy)
         .args([
             "-o",
             "ProxyUseFdpass=no",

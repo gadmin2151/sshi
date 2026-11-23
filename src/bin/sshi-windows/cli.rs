@@ -68,11 +68,23 @@ struct Target {
     destination: String,
 }
 
-pub fn executable_command(name: &OsStr) -> Option<&'static str> {
+fn executable_command(name: &OsStr) -> Option<&'static str> {
     let stem = Path::new(name).file_stem()?.to_str()?;
     ["sshi-copy-id", "sshi-copy-iid"]
         .into_iter()
         .find(|command| stem.eq_ignore_ascii_case(command))
+}
+
+pub fn expand_short_command(arguments: &mut Vec<OsString>) {
+    if let Some(command) = arguments.first().and_then(|name| executable_command(name)) {
+        arguments.insert(1, command.into());
+    } else if arguments
+        .get(1)
+        .and_then(|arg| arg.to_str())
+        .is_some_and(|value| iroh_ssh::profiles::destination(value).is_ok())
+    {
+        arguments.insert(1, "connect".into());
+    }
 }
 
 pub fn run(arguments: &[OsString]) -> i32 {
@@ -215,4 +227,35 @@ fn from_destination(destination: &str, profiles: Vec<Profile>) -> Result<Profile
         ssh_key: String::new(),
         relay_token: Vec::new(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expands_only_valid_bare_destinations_and_keeps_executable_aliases() {
+        let address = format!("pi@{}", iroh::SecretKey::from_bytes(&[7; 32]).public());
+        for (args, expected) in [
+            (
+                vec!["sshi.exe", &address, "-i", "file"],
+                vec!["sshi.exe", "connect", &address, "-i", "file"],
+            ),
+            (
+                vec!["sshi-copy-id.exe", &address],
+                vec!["sshi-copy-id.exe", "sshi-copy-id", &address],
+            ),
+            (vec!["sshi.exe", "pi@bad"], vec!["sshi.exe", "pi@bad"]),
+            (
+                vec!["sshi.exe", "connect", "studio"],
+                vec!["sshi.exe", "connect", "studio"],
+            ),
+            (vec!["sshi.exe", "--help"], vec!["sshi.exe", "--help"]),
+            (vec!["sshi.exe"], vec!["sshi.exe"]),
+        ] {
+            let mut actual: Vec<OsString> = args.into_iter().map(Into::into).collect();
+            expand_short_command(&mut actual);
+            assert_eq!(actual, expected);
+        }
+    }
 }

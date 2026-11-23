@@ -3,6 +3,7 @@
 Run as the macOS runner user: python3 tests/mac_relay_smoke.py
 """
 import contextlib
+import json
 import os
 from pathlib import Path
 import pwd
@@ -12,6 +13,8 @@ import subprocess
 import sys
 import tempfile
 import time
+
+from login_pty import first_login
 
 
 def command(args, env, data=b"", check=True):
@@ -89,8 +92,10 @@ def smoke(base):
         "PasswordAuthentication no\nKbdInteractiveAuthentication no\nAuthenticationMethods publickey\n"
         "UsePAM no\nPermitUserRC no\nStrictModes no\nDisableForwarding yes\nPrintLastLog no\n"
     )
-    for name in ("host", "client"):
+    for name in ("host", "client", "interactive"):
         command(["/usr/bin/ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", base / name], env)
+    with (base / "client.pub").open("a") as keys:
+        keys.write('command="echo sshi-pty-authed; exit 36" ' + (base / "interactive.pub").read_text())
     rx = dict(env, XDG_STATE_HOME=str(base / "rx"))
     tx = dict(env, XDG_STATE_HOME=str(base / "tx"))
     receiver = command([sshi, "id"], rx).stdout.decode().strip()
@@ -127,9 +132,27 @@ def smoke(base):
 
         denied = command(connect + ["true"], tx, check=False)
         assert denied.returncode != 0 and b"not allowed" in denied.stderr, denied.stderr
+        terminal_config = base / "interactive.config"
+        terminal_config.write_text(options.read_text().replace(f"IdentityFile {base}/client", f"IdentityFile {base}/interactive")
+                                   .replace("BatchMode yes", "BatchMode no").replace("ConnectTimeout 15", "ConnectTimeout 45"))
+        grant = command([sshi, "invite", client], rx).stdout
+        first_login([sshi, destination], dict(tx, SSHI_SMOKE_SSH_CONFIG=str(terminal_config)), grant, client,
+                    shell_prompt=False)
+        command([sshi, "revoke-invite", client], rx)
+        wait("interactive broker shutdown", lambda: not (base / "tx/sshi/proxy.sock").exists(), timeout=15)
+        print("First interactive login prompted, accepted a hidden code and authenticated", flush=True)
         code = command([sshi, "invite", client], rx).stdout
-        command([sshi, "copy-iid", "--invite", destination], tx, data=code)
-        print("Targeted invitation redeemed through the local relay", flush=True)
+        command([sshi, "invitation", "redeem", "--endpoint", receiver], tx, data=code)
+        assert command(connect + ["true"], tx).returncode == 0
+        command([sshi, "revoke-invite", client], rx)
+        wait("first broker shutdown", lambda: not (base / "tx/sshi/proxy.sock").exists(), timeout=15)
+        link = command([sshi, "invite", client, "--share", "--user", user], rx).stdout
+        preview = command([sshi, "invitation", "inspect"], tx, data=link)
+        assert json.loads(preview.stdout) == {"user": user, "endpoint": receiver, "relay": url}
+        alternate = dict(tx, IROH_RELAY_URL="http://127.0.0.1:1/")
+        command([sshi, "invitation", "redeem"], alternate, data=link)
+        print("Separate code and complete invitation link redeemed through the local relay", flush=True)
+        baseline = rx_log.read_text().count(f"Shared iroh connection from {client}")
 
         session_log = base / "session.log"
         remote = """sh -c 'echo first-ready; read -r reply && echo "received-$reply"'"""
@@ -142,7 +165,7 @@ def smoke(base):
             assert first.wait(timeout=15) == 0, session_log.read_text()
             assert "received-second-finished" in session_log.read_text()
         assert command([sshi, "list"], tx).stdout.decode().splitlines() == [destination]
-        assert rx_log.read_text().count(f"Shared iroh connection from {client}") == 1, rx_log.read_text()
+        assert rx_log.read_text().count(f"Shared iroh connection from {client}") == baseline + 1, rx_log.read_text()
         wait("broker shutdown", lambda: not (base / "tx/sshi/proxy.sock").exists(), timeout=15)
         print("Two overlapping named SSH sessions authenticated, shared one Iroh connection and closed cleanly", flush=True)
 

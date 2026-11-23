@@ -5,7 +5,7 @@ enum AppLanguage: String, CaseIterable {
     case english = "en"
 
     static let preferenceKey = "interfaceLanguage"
-    static let releaseNotes = URL(string: "https://github.com/gadmin2151/sshi/releases/tag/v0.2.1")!
+    static let releaseNotes = URL(string: "https://github.com/gadmin2151/sshi/releases/tag/v0.2.2")!
 
     static func current(in defaults: UserDefaults = .standard) -> Self {
         defaults.string(forKey: preferenceKey).flatMap(Self.init(rawValue:)) ?? .russian
@@ -15,7 +15,7 @@ enum AppLanguage: String, CaseIterable {
         self == .english ? english : russian
     }
 
-    var whatsNew: String { self("Что нового в 0.2.1", "What’s new in 0.2.1") }
+    var whatsNew: String { self("Что нового в 0.2.2", "What’s new in 0.2.2") }
 
     func commandError(_ detail: String) -> String {
         let message = detail.lowercased()
@@ -35,6 +35,10 @@ enum AppLanguage: String, CaseIterable {
         }
         if message.contains("an authenticated relay requires https") {
             return self("Для relay с токеном нужен адрес HTTPS.", "A relay with a token needs an HTTPS URL.")
+        }
+        if message.contains("no relay configured") || message.contains("set a relay url first") {
+            return self("Укажите адрес relay в настройках SSHI и повторите попытку.",
+                        "Set the relay URL in SSHI settings, then try again.")
         }
         if message.contains("invalid connection relay") || message.contains("invalid relay url") ||
             message.contains("http or https relay url") || message.contains("url may not contain a query or fragment") {

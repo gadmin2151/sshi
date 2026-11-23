@@ -92,12 +92,16 @@ enum Client {
 }
 
 enum Panel {
-    case edit(Profile?), recent, token(Profile), invite(Profile), key(Profile), forward(Profile), settings
+    case edit(Profile), recent, token(Profile), invite(Profile), key(Profile), forward(Profile), settings
 }
 
 struct SheetItem: Identifiable {
     let id = UUID()
-    let panel: Panel
+    enum Content {
+        case editor(Panel)
+        case invitation(InvitationStart)
+    }
+    let content: Content
 }
 
 @MainActor
@@ -184,7 +188,8 @@ final class Workspace: ObservableObject {
         }
     }
 
-    func show(_ panel: Panel) { sheet = SheetItem(panel: panel) }
+    func show(_ panel: Panel) { sheet = SheetItem(content: .editor(panel)) }
+    func showInvitation(_ start: InvitationStart) { sheet = SheetItem(content: .invitation(start)) }
 
     func remove(_ profile: Profile) {
         let alert = NSAlert()
@@ -232,7 +237,7 @@ struct ProfileDetail: View {
                     Menu(language("Доступ", "Access")) {
                         Button(language("Токен этого relay…", "Relay token…")) { workspace.show(.token(profile)) }
                         Button(language("Ввести приглашение…", "Redeem invitation…")) {
-                            workspace.launch(profile.prefix + ["copy-iid", "--invite", profile.destination])
+                            workspace.showInvitation(.join(profile))
                         }
                         Button(language("Создать приглашение…", "Create invitation…")) { workspace.show(.invite(profile)) }
                         Button(language("Установить SSH-ключ…", "Install SSH key…")) { workspace.show(.key(profile)) }
@@ -483,10 +488,11 @@ struct WorkspaceView: View {
                         Image(systemName: "terminal").font(.largeTitle).foregroundColor(.accentColor)
                         Text(workspace.query.isEmpty ? language("Подключения", "Connections") : language("Ничего не найдено", "No matches")).font(.title.bold())
                         if workspace.query.isEmpty {
-                            Text(language("Сохраните имя, пользователя SSH и Endpoint ID удалённого компьютера.", "Save the SSH user and Endpoint ID of the remote computer under a name."))
+                            Text(language("Подключитесь по приглашению или укажите адрес компьютера вручную.", "Connect with an invitation or enter a computer’s address manually."))
                                 .foregroundColor(.secondary).multilineTextAlignment(.center)
-                            Button(language("Новое подключение", "New connection")) { workspace.show(.edit(nil)) }
+                            Button(language("Новое подключение", "New connection")) { workspace.showInvitation(.join(nil)) }
                                 .buttonStyle(.borderedProminent)
+                            Button(language("Пригласить на этот Mac…", "Invite to this Mac…")) { workspace.showInvitation(.host) }
                         }
                     }.padding(40).frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
@@ -519,13 +525,14 @@ struct WorkspaceView: View {
         .toolbar {
             ToolbarItemGroup(placement: .automatic) {
                 if workspace.busy { ProgressView().controlSize(.small) }
-                Button { workspace.show(.edit(nil)) } label: { Label(language("Новое подключение", "New connection"), systemImage: "plus") }
+                Button { workspace.showInvitation(.join(nil)) } label: { Label(language("Новое подключение", "New connection"), systemImage: "plus") }
                     .keyboardShortcut("n").help(language("Новое подключение", "New connection"))
                 Button { workspace.show(.settings) } label: { Label(language("Настройки", "Settings"), systemImage: "gearshape") }
                     .keyboardShortcut(",", modifiers: .command).help(language("Настройки", "Settings"))
                 Menu {
                     Button(language("Недавние подключения…", "Recent connections…")) { workspace.show(.recent) }
                     Button(language("Скопировать мой Endpoint ID", "Copy my Endpoint ID")) { workspace.copyId() }
+                    Button(language("Пригласить на этот Mac…", "Invite to this Mac…")) { workspace.showInvitation(.host) }
                     Divider()
                     Button(language("Экспорт подключений…", "Export connections…")) { workspace.backup(restore: false) }
                     Button(language("Импорт подключений…", "Import connections…")) { workspace.backup(restore: true) }
@@ -534,7 +541,12 @@ struct WorkspaceView: View {
                 } label: { Label(language("Действия", "Actions"), systemImage: "ellipsis.circle") }
             }
         }
-        .sheet(item: $workspace.sheet) { item in Editor(workspace: workspace, panel: item.panel) }
+        .sheet(item: $workspace.sheet) { item in
+            switch item.content {
+            case .editor(let panel): Editor(workspace: workspace, panel: panel)
+            case .invitation(let start): InvitationSheet(workspace: workspace, start: start)
+            }
+        }
         .alert("SSHI", isPresented: Binding(get: { workspace.feedback != nil }, set: { if !$0 { workspace.feedback = nil } })) {
             Button("OK") { workspace.feedback = nil }
         } message: { Text(workspace.feedback ?? "") }
@@ -559,7 +571,7 @@ struct Editor: View {
 
     private var title: String {
         switch panel {
-        case .edit(let old): return old == nil ? language("Новое подключение", "New connection") : language("Настройки подключения", "Connection settings")
+        case .edit: return language("Настройки подключения", "Connection settings")
         case .settings: return language("Настройки", "Settings")
         case .recent: return language("Сохранить недавнее подключение", "Save a recent connection")
         case .token: return language("Токен relay", "Relay token")
@@ -643,12 +655,10 @@ struct Editor: View {
     private func load() {
         switch panel {
         case .edit(let p):
-            if let p = p {
-                name = p.name
-                user = p.user
-                endpoint = p.endpoint
-                relay = p.relay
-            }
+            name = p.name
+            user = p.user
+            endpoint = p.endpoint
+            relay = p.relay
         case .recent:
             do {
                 let data = try Client.run(["list"])
@@ -669,8 +679,7 @@ struct Editor: View {
         do {
             switch panel {
             case .edit(let old):
-                var args = ["profile", "save", "--name", name, "--user", user, "--endpoint", endpoint]
-                if let old = old { args += ["--previous", old.name] }
+                var args = ["profile", "save", "--name", name, "--user", user, "--endpoint", endpoint, "--previous", old.name]
                 if !relay.isEmpty { args += ["--relay", relay] }
                 try Client.run(args)
                 try workspace.reload(select: name)
@@ -690,7 +699,7 @@ struct Editor: View {
                 try Client.run(["profile", "save", "--name", name, "--endpoint", endpoint, "--user", user])
                 try workspace.reload(select: name)
             case .invite(let p):
-                var args = ["issue-invite", "--name", p.name, "--client", endpoint]
+                var args = ["issue-invite", "--name", p.name, "--client", endpoint, "--share"]
                 if !user.isEmpty { args += ["--service-user", user] }
                 workspace.launch(args)
             case .key(let p):
@@ -716,7 +725,7 @@ struct Editor: View {
                 Text(message).foregroundColor(.red).textSelection(.enabled)
             }
             HStack {
-                if case .edit(let old) = panel, let p = old {
+                if case .edit(let p) = panel {
                     Button(language("Удалить…", "Delete…"), role: .destructive) { workspace.remove(p) }
                 }
                 Spacer()

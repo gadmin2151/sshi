@@ -7,6 +7,8 @@ mod cli;
 #[cfg(windows)]
 mod forward_dialog;
 #[cfg(windows)]
+mod join_dialog;
+#[cfg(windows)]
 mod lang;
 #[cfg(windows)]
 mod store;
@@ -36,12 +38,7 @@ fn main() {
         }
         return;
     }
-    if let Some(command) = arguments
-        .first()
-        .and_then(|name| cli::executable_command(name))
-    {
-        arguments.insert(1, command.into());
-    }
+    cli::expand_short_command(&mut arguments);
     let mode = arguments.get(1).and_then(|value| value.to_str());
     let result: Result<()> = (|| match mode {
         Some("--forward-proxy") => {
@@ -90,7 +87,19 @@ fn main() {
                 } else if enrollment {
                     iroh_ssh::run_async(terminal::enroll(store, profile, interactive))
                 } else if issue_invite {
-                    iroh_ssh::run_async(terminal::issue_invite(store, profile, interactive))
+                    if let [guest, account] = &arguments[2..] {
+                        let guest = guest.to_str().context("Invalid guest ID")?.parse()?;
+                        let account = account.to_str().context("Invalid receiver account")?;
+                        iroh_ssh::run_async(terminal::issue_to(
+                            store,
+                            profile,
+                            interactive,
+                            guest,
+                            account,
+                        ))
+                    } else {
+                        iroh_ssh::run_async(terminal::issue_invite(store, profile, interactive))
+                    }
                 } else {
                     let action = if install_key {
                         terminal::RelayAction::CopySshKey

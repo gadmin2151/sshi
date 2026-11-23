@@ -18,7 +18,7 @@ app="$work/root/Applications/SSHI.app"
 mkdir -p "$app/Contents/"{MacOS,Resources/bin} "$work/root/usr/local/bin" "$work/root/usr/local/share/man/man1" "$work/scripts" dist
 install -m 755 "$cli" "$app/Contents/Resources/bin/sshi"
 swiftc -swift-version 5 -parse-as-library -O -target arm64-apple-macos12.0 \
-    desktop/macos/{SSHI,Localization,Forwarding}.swift -o "$app/Contents/MacOS/SSHI"
+    desktop/macos/{SSHI,Localization,Forwarding,Invitations}.swift -o "$app/Contents/MacOS/SSHI"
 install -m 644 desktop/macos/Info.plist "$app/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" "$app/Contents/Info.plist"
 cp packaging/config.toml LICENSE "$app/Contents/Resources/"

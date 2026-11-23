@@ -70,7 +70,7 @@ def check(binary, root):
         combo, = [widget for widget in children(dialog) if isinstance(widget, Gtk.ComboBoxText)]
         assert combo.get_active_id() == "ru"
         link, = [widget for widget in children(dialog) if isinstance(widget, Gtk.LinkButton)]
-        assert link.get_uri() == module.RELEASE_URL and link.get_label() == "Что нового в 0.2.1"
+        assert link.get_uri() == module.RELEASE_URL and link.get_label() == "Что нового в 0.2.2"
         combo.set_active_id("en")
         return Gtk.ResponseType.OK
 

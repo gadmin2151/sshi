@@ -10,6 +10,9 @@ use tokio::{sync::Semaphore, task, time::timeout};
 
 use crate::tunnel::wait_for_relay;
 
+mod share;
+pub use share::{InvitationRoute, MAX_INVITATION_BYTES, SharedInvitation};
+
 pub(crate) const ALPN: &[u8] = b"iroh-ssh/enroll/1";
 const TIMEOUT: Duration = Duration::from_secs(10);
 

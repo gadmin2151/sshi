@@ -1,27 +1,28 @@
-## Что нового в SSHI 0.2.1
+## SSHI 0.2.2 · Первое подключение
+
+**Если у вас уже есть ID получателя и код**, откройте новое подключение по приглашению. Вставьте ID удалённого компьютера в поле получателя, код — в поле приглашения. Укажите пользователя SSH на удалённом компьютере и подтвердите вход.
 
 ### Добавлено
 
-- В окне проброса портов появилась схема двух компьютеров. Стрелки показывают направление подключения, а подписи меняются по мере ввода адресов и портов. Можно открыть удалённый сервис на своём ПК, предоставить удалённому ПК доступ к локальному сервису или настроить SOCKS-прокси.
-- В настройках Linux, Windows и macOS можно выбрать русский или английский язык. Программа запоминает выбор. Пункт «Что нового» открывает страницу текущего выпуска.
-- В CLI Linux и macOS появилась команда для запуска проброса по имени профиля. Например, `sshi forward --profile "Мастерская" --kind local --bind-port 8080 --target-host 127.0.0.1 --target-port 80` открывает порт 8080 на вашем компьютере и направляет подключения на порт 80 получателя.
+- На macOS, Windows и Linux приглашение можно принять из пустого списка подключений. В той же форме можно скопировать свой публичный Endpoint ID для владельца сервера.
+- Владелец может передать одну ссылку с ID получателя, пользователем SSH и адресом relay. Клиент показывает эти параметры перед подключением. Токен частного relay вводится отдельно.
+- На принимающем компьютере с Linux или macOS команда `sshi invite "$CLIENT_ID" --share --user pi` создаёт ссылку для конкретного гостя. На уже доверенном компьютере полную ссылку можно выпустить через сохранённое SSH-подключение.
+- При вводе просроченного кода или кода для другого устройства можно исправить данные и попробовать снова. В сохранённом профиле и резервной копии хранятся параметры подключения.
+- Обычный интерактивный вход `sshi user@ID` или `sshi connect ИМЯ` предлагает вставить приглашение, когда получатель отклонил Iroh ID. SSHI показывает ID клиента и продолжает SSH-вход после подтверждения.
 
 ### Исправлено
 
-- Первый щелчок выделяет профиль. Быстрый двойной щелчок открывает один терминал. Чтобы переименовать подключение, щёлкните по выделенному имени ещё раз после системного интервала двойного щелчка.
-- Переименование меняет только имя подключения и сохраняет пользователя SSH, Endpoint ID и relay. В CLI доступна команда `sshi profile rename --name "Мастерская" --to "Сервер мастерской"`.
+- Для первого входа гостю больше не нужно заранее сохранять профиль и искать, куда ввести код. Обычный код, полученный от старой версии SSHI, работает вместе с ID получателя.
+- На экране подключения отдельно обозначены ID этого компьютера и ID получателя. После выдачи доступа через Iroh выполняется обычная SSH-аутентификация.
 
-## English
+## English · First connection
 
-### Added
+If the server owner sent you a receiver ID and a code, open a new connection and choose the invitation option. Paste the remote computer’s ID and the invitation into their respective fields, enter your SSH username, and confirm.
 
-- The forwarding window shows the two computers, the traffic direction and the addresses to use. Choose access to a remote service, access to a local service from the remote computer, or a local SOCKS proxy.
-- Choose English or Russian in Settings on Linux, Windows and macOS. The app remembers your choice. Open **What’s new** to read the notes for your version.
-- On Linux and macOS, `sshi forward` starts a tunnel from a saved profile using separate address and port arguments.
+- Join from an empty profile library on macOS, Windows or Linux. Copy your computer’s public ID from the same form when you need an invitation.
+- Paste a full invitation link to preview the receiver, SSH user and relay together. Older invitation codes work with a separately supplied receiver ID.
+- Issue a shareable link on a Linux or macOS receiver with `sshi invite "$CLIENT_ID" --share --user pi`, or create one through an authorized connection. Invitations are tied to the guest’s identity and expire after ten minutes.
+- After enrollment the client saves the connection and uses normal SSH authentication. On a private relay, obtain its access token from the administrator.
+- On first interactive login, `sshi user@ID` or `sshi connect NAME` prompts for a code or link if the receiver denies that client’s Iroh ID, then continues the SSH login.
 
-### Fixed
-
-- A single click selects a connection. A fast double-click opens one terminal. Click the selected name again after a pause to rename it.
-- Renaming a profile preserves its SSH user, Endpoint ID and relay settings. The CLI also supports `sshi profile rename`.
-
-Контрольные суммы пакетов находятся в файле `SHA256SUMS`. [Инструкции по установке](https://github.com/gadmin2151/sshi/blob/v0.2.1/README.md)
+[Установка и первый вход / Setup and first connection](https://github.com/gadmin2151/sshi/blob/v0.2.2/README.md)

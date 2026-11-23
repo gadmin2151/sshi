@@ -30,7 +30,12 @@ pub fn caption(source: &'static str) -> &'static str {
         "SSH через iroh" => "SSH over Iroh",
         "Папка данных" => "Data folder",
         "Подключения" => "Connections",
-        "Новое" => "New",
+        "Новое" => "New…",
+        "По приглашению…" => "Join by invitation…",
+        "Ввести вручную…" => "Enter manually…",
+        "Чтобы подключиться, используйте приглашение от владельца сервера или введите адрес вручную." => {
+            "Use an invitation from the server owner or enter the connection details manually."
+        }
         "Удалить" => "Delete",
         "Название подключения" => "Connection name",
         "Пользователь" => "Username",

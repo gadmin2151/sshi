@@ -1,5 +1,6 @@
 #!/usr/bin/python3
 """GTK client for the same SSHI profiles, settings and sessions used by the CLI."""
+import getpass
 import ipaddress
 import json
 import locale
@@ -10,6 +11,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+from urllib.parse import urlsplit
 
 try:
     import gi
@@ -24,7 +27,7 @@ if not os.path.isfile(SSHI):
     SSHI = shutil.which("sshi") or "sshi"
 
 LANGUAGE_FILE = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "sshi/desktop-language"
-RELEASE_URL = "https://github.com/gadmin2151/sshi/releases/tag/v0.2.1"
+RELEASE_URL = "https://github.com/gadmin2151/sshi/releases/tag/v0.2.2"
 
 
 def read_language():
@@ -127,9 +130,9 @@ def box(vertical=False, spacing=8):
                    spacing=spacing)
 
 
-def cli(*args, stdin=None):
+def cli(*args, stdin=None, timeout=8):
     result = subprocess.run([SSHI, *args], input=stdin, capture_output=True,
-                            text=True, timeout=8, check=False)
+                            text=True, timeout=timeout, check=False)
     if result.returncode != 0:
         raise ValueError(result.stderr.strip() or tr("Команда SSHI завершилась с ошибкой.", "The SSHI command failed."))
     return result.stdout.strip()
@@ -365,6 +368,276 @@ class ForwardDialog(Gtk.Dialog):
                                  "--target-port", self.target_port.get_text().strip()])
 
 
+class ConnectionDialog(Gtk.Dialog):
+    def __init__(self, parent, profile=None):
+        super().__init__(title=tr("Принять приглашение", "Redeem invitation") if profile else
+                         tr("Новое подключение", "New connection"), transient_for=parent, modal=True)
+        self.manager = parent
+        self.profile = profile
+        self.pending = False
+        self.inspected = None
+        self.granted_route = None
+        self.manual_route = None
+        self.set_default_size(610, -1)
+        self.add_button(tr("Отмена", "Cancel"), Gtk.ResponseType.CANCEL)
+        self.submit = styled(self.add_button("", Gtk.ResponseType.OK), "suggested-action", "sshi-primary")
+        self.set_default_response(Gtk.ResponseType.OK)
+        self.body = box(True, 12)
+        self.body.set_border_width(18)
+        self.get_content_area().add(self.body)
+        self.mode = Gtk.ComboBoxText()
+        self.mode.append("invite", tr("По приглашению", "Join with an invitation"))
+        self.mode.append("manual", tr("Вручную · доступ уже есть", "Manual · already authorized"))
+        self.mode.set_active_id("invite")
+        self.mode.get_accessible().set_name(tr("Способ подключения", "Connection method"))
+        self.body.add(self.mode)
+
+        form = Gtk.Grid(column_spacing=12, row_spacing=5, column_homogeneous=True)
+        self.body.add(form)
+
+        def field(row, col, width, heading, hint, secret=False):
+            caption = label(heading, "sshi-section")
+            item = Gtk.Entry(placeholder_text=hint, visibility=not secret, hexpand=True)
+            item.set_activates_default(True)
+            caption.set_mnemonic_widget(item)
+            form.attach(caption, col, row, width, 1)
+            form.attach(item, col, row + 1, width, 1)
+            return item
+
+        self.code_label = label(tr("Код или ссылка приглашения", "Invitation code or link"), "sshi-section")
+        self.code = Gtk.Entry(placeholder_text=tr("Вставьте приглашение", "Paste the invitation"),
+                              visibility=False, hexpand=True)
+        self.code.set_activates_default(True)
+        self.code_label.set_mnemonic_widget(self.code)
+        self.paste = action(tr("Вставить", "Paste"), self.paste_invitation, "edit-paste-symbolic")
+        self.code_row = box()
+        self.code_row.add(self.code)
+        self.code_row.add(self.paste)
+        form.attach(self.code_label, 0, 0, 2, 1)
+        form.attach(self.code_row, 0, 1, 2, 1)
+        self.endpoint = field(2, 0, 2, tr("Endpoint ID получателя", "Receiver Endpoint ID"),
+                              tr("64 символа · компьютер, к которому подключаетесь", "64 characters · the computer you want to reach"))
+        styled(self.endpoint, "sshi-mono")
+        self.user = field(4, 0, 1, tr("Пользователь SSH", "SSH user"), tr("Например, pi", "For example, pi"))
+        self.name = field(4, 1, 1, tr("Имя подключения", "Connection name"), tr("Необязательно", "Optional"))
+        self.relay = field(6, 0, 2, "Relay", tr("Из настроек SSHI", "From SSHI settings"))
+        self.token_panel = Gtk.Expander(label=tr("Токен relay · если требуется", "Relay token · if required"))
+        self.token = Gtk.Entry(visibility=False, placeholder_text=tr("Токен доступа к этому relay", "Access token for this relay"))
+        self.token.get_accessible().set_name(tr("Токен relay", "Relay token"))
+        self.token.set_activates_default(True)
+        self.token_panel.add(self.token)
+        self.body.add(self.token_panel)
+
+        self.result = label("", wrap=True)
+        self.result.set_max_width_chars(65)
+        self.result.connect("notify::label", lambda item, *_: item.set_visible(bool(item.get_text())))
+        self.body.add(self.result)
+        self.help = box(True, 6)
+        self.hint = label(tr("Чтобы получить приглашение, отправьте свой ID владельцу удалённого компьютера.",
+                             "To get an invitation, send your ID to the remote computer’s owner."), wrap=True)
+        self.help.add(self.hint)
+        actions = box(False, 8)
+        self.copy = action(tr("Скопировать мой ID", "Copy my ID"), self.copy_id, "edit-copy-symbolic")
+        actions.add(self.copy)
+        if not profile:
+            actions.add(action(tr("Пригласить на этот компьютер…", "Invite to this computer…"),
+                               lambda: parent.invite_local(self), "mail-send-symbolic"))
+        self.help.add(actions)
+        self.body.add(self.help)
+        if profile:
+            for widget, key in [(self.endpoint, "endpoint"), (self.user, "user"), (self.name, "name"), (self.relay, "relay")]:
+                widget.set_text(profile[key])
+                widget.set_editable(False)
+        self.code.connect("changed", self.refresh)
+        self.mode.connect("changed", self.refresh)
+        self.endpoint.connect("changed", self.validate)
+        self.user.connect("changed", self.validate)
+        self.name.connect("changed", self.validate)
+        self.relay.connect("changed", self.relay_changed)
+        self.connect("delete-event", lambda *_: self.pending)
+        self.show_all()
+        self.refresh()
+        self.code.grab_focus()
+
+    def relay_changed(self, *_):
+        self.token.set_text("")
+        self.validate()
+
+    def paste_invitation(self):
+        value = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).wait_for_text()
+        if value:
+            self.code.set_text(value.strip())
+        else:
+            self.result.set_text(tr("В буфере обмена нет текста.", "The clipboard has no text."))
+
+    def copy_id(self):
+        try:
+            clip = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+            clip.set_text(cli("id"), -1)
+            clip.store()
+            self.hint.set_text(tr("ID скопирован. Отправьте его владельцу удалённого компьютера.",
+                                  "ID copied. Send it to the remote computer’s owner."))
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            self.result.set_text(str(error))
+
+    def refresh(self, *_):
+        invite = self.mode.get_active_id() == "invite"
+        self.mode.set_visible(not self.profile)
+        for widget in (self.code_label, self.code_row, self.code, self.help, self.token_panel):
+            widget.set_visible(invite)
+        self.submit.set_label(tr("Принять и подключиться", "Accept and connect") if invite else tr("Сохранить", "Save"))
+        text = self.code.get_text().strip() if invite else ""
+        link = text.startswith("sshi:")
+        self.inspected = None
+        self.result.set_text("")
+        self.result.hide()
+        route_widgets = (self.endpoint, self.user, self.relay)
+        if link and not self.profile and self.manual_route is None:
+            self.manual_route = tuple(w.get_text() for w in route_widgets)
+        if link:
+            try:
+                meta = json.loads(cli("invitation", "inspect", stdin=text + "\n"))
+            except (OSError, ValueError, subprocess.SubprocessError):
+                self.result.set_text(tr("Вставьте полную ссылку приглашения.", "Paste the complete invitation link."))
+            else:
+                self.inspected = meta
+                if self.profile and (self.profile["endpoint"] != meta["endpoint"] or self.profile["user"] != meta["user"]):
+                    self.inspected = None
+                    self.result.set_text(tr("Приглашение выдано для другого подключения.",
+                                            "This invitation is for a different connection."))
+                elif self.profile and meta["relay"]:
+                    try:
+                        config = json.loads(cli("profile", "run", "--name", self.profile["name"], "--", "config", "show", "--json"))
+                        if not self.same_relay(config["relay_url"], meta["relay"]):
+                            raise ValueError
+                    except (OSError, ValueError, subprocess.SubprocessError):
+                        self.inspected = None
+                        self.result.set_text(tr("Relay в приглашении отличается от relay сохранённого подключения.",
+                                                "The invitation relay differs from the saved connection’s relay."))
+            if not self.profile:
+                meta = self.inspected or {}
+                for widget, key in zip(route_widgets, ("endpoint", "user", "relay")):
+                    value = meta.get(key, "")
+                    if key == "relay" and not value and self.inspected:
+                        value = self.manual_route[2]
+                    if widget.get_text() != value:
+                        widget.set_text(value)
+        elif self.manual_route is not None:
+            for widget, value in zip(route_widgets, self.manual_route):
+                widget.set_text(value)
+            self.manual_route = None
+        if self.profile:
+            displayed_relay = (self.inspected or {}).get("relay") or self.profile["relay"]
+            if self.relay.get_text() != displayed_relay:
+                self.relay.set_text(displayed_relay)
+        for widget in (self.endpoint, self.user):
+            widget.set_editable(not self.profile and not link)
+        self.relay.set_editable(not self.profile and (not link or not (self.inspected or {}).get("relay")))
+        self.validate()
+
+    @staticmethod
+    def same_relay(left, right):
+        # A missing root slash and the default HTTP(S) port describe the same relay.
+        def parts(text):
+            url = urlsplit(text)
+            return url.scheme, url.hostname, url.port or {"https": 443, "http": 80}.get(url.scheme), url.path or "/", url.query, url.fragment
+        return parts(left) == parts(right)
+
+    def validate(self, *_):
+        ep, user = self.endpoint.get_text().strip().lower(), self.user.get_text().strip()
+        valid = (re.fullmatch(r"[0-9a-f]{64}", ep) and user and not user.startswith("-")
+                 and len(user.encode()) <= 256 and not re.search(r"[\s@\x00-\x1f\x7f-\x9f]", user))
+        suggestion = f"{user}@{ep[:12]}" if valid else tr("Необязательно", "Optional")
+        if len(suggestion.encode()) > 256:
+            suggestion = ep[:12]
+        self.name.set_placeholder_text(suggestion)
+        name = self.name.get_text().strip() or suggestion
+        code = self.code.get_text().strip()
+        if self.mode.get_active_id() == "invite":
+            valid = valid and (self.inspected is not None or re.fullmatch(r"[0-9a-fA-F]{64}", code))
+        self.submit.set_sensitive(bool(valid) and len(name.encode()) <= 256
+                                  and not re.search(r"[\x00-\x1f\x7f-\x9f]", name) and not self.pending)
+
+    def start(self):
+        if self.pending or not self.submit.get_sensitive():
+            return
+        code = self.code.get_text().strip()
+        ep, user, relay = (e.get_text().strip() for e in (self.endpoint, self.user, self.relay))
+        ep = ep.lower()
+        name = self.name.get_text().strip() or self.name.get_placeholder_text()
+        token = self.token.get_text()
+        invite = self.mode.get_active_id() == "invite"
+        previously_granted = self.granted_route == (ep, relay)
+        self.pending = True
+        self.body.set_sensitive(False)
+        self.set_response_sensitive(Gtk.ResponseType.CANCEL, False)
+        self.validate()
+        self.result.set_text(tr("Проверяем приглашение через Iroh…", "Checking invitation over Iroh…") if invite else "")
+        def work():
+            error = None
+            granted = previously_granted
+            selected_name = name
+            try:
+                profiles = json.loads(cli("profile", "list", "--json"))
+                current = next((p for p in profiles if p["name"].lower() == name.lower()), None)
+                if self.profile:
+                    if current != self.profile:
+                        raise ValueError(tr("Сохранённое подключение изменилось. Откройте его снова.",
+                                            "The saved connection changed. Open it again."))
+                elif current and (current["endpoint"], current["user"], current["relay"]) != (ep, user, relay):
+                    raise ValueError(tr("Это имя занято другим подключением. Выберите новое имя.",
+                                        "Another connection has this name. Choose a different name."))
+                if invite and not granted:
+                    args = ["invitation", "redeem", "--endpoint", ep]
+                    route = ["--relay", relay] if relay else []
+                    if token:
+                        cli("config", "set-token", *route, stdin=token + "\n")
+                    cli(*args, *route, stdin=code + "\n", timeout=45)
+                    granted = True
+                if current:
+                    selected_name = current["name"]
+                else:
+                    cli("profile", "save", "--name", name, "--endpoint", ep, "--user", user, "--relay", relay)
+            except (ValueError, OSError, subprocess.SubprocessError) as exc:
+                error = str(exc)
+                detail = error.lower()
+                if "invitation denied" in detail or "expired" in detail:
+                    error = tr("Получатель отклонил приглашение. Скопируйте свой ID, попросите новый код у владельца и вставьте его сюда.",
+                               "The receiver declined the invitation. Copy your ID, ask the owner for a fresh code, then paste it here.")
+                elif isinstance(exc, subprocess.TimeoutExpired) or any(word in detail for word in (
+                        "timed out", "deadline", "connection lost", "failed to connect", "could not connect", "unreachable")):
+                    error = tr("Не удалось связаться с получателем. Сверьте его Endpoint ID и адрес relay, затем проверьте, что на нём запущена служба sshi.",
+                               "Could not reach the receiver. Check its Endpoint ID and relay address, then check that its sshi service is running.")
+            GLib.idle_add(self.finish, selected_name, invite, error, (ep, relay) if granted else None)
+        threading.Thread(target=work, daemon=True).start()
+
+    def finish(self, name, invite, error, grant):
+        self.pending = False
+        self.granted_route = grant
+        self.body.set_sensitive(True)
+        self.set_response_sensitive(Gtk.ResponseType.CANCEL, True)
+        if error:
+            self.result.set_text(error)
+            self.validate()
+        else:
+            self.code.set_text("")
+            self.token.set_text("")
+            self.manager.safe(lambda: self.manager.reload(name))
+            self.response(Gtk.ResponseType.CLOSE)
+            if invite:
+                self.manager.safe(lambda: open_terminal(["connect", name], False))
+        return GLib.SOURCE_REMOVE
+
+    def present_form(self):
+        while True:
+            response = self.run()
+            if response == Gtk.ResponseType.OK and not self.pending:
+                self.start()
+            elif not self.pending:
+                break
+        self.destroy()
+
+
 class Window(Gtk.Window):
     def __init__(self):
         super().__init__(title="SSHI")
@@ -445,6 +718,7 @@ class Window(Gtk.Window):
         menu = Gtk.Menu()
         for text, callback in [
             (tr("Недавние подключения…", "Recent connections…"), self.history), (tr("Скопировать мой Endpoint ID", "Copy my Endpoint ID"), self.copy_id),
+            (tr("Пригласить на этот компьютер…", "Invite to this computer…"), self.invite_local),
             (tr("Настройки…", "Settings…"), self.settings),
             (tr("Экспорт подключений…", "Export connections…"), lambda: self.backup(False)),
             (tr("Импорт подключений…", "Import connections…"), lambda: self.backup(True)),
@@ -576,13 +850,12 @@ class Window(Gtk.Window):
         if p is None:
             add(label(tr("Подключения", "Connections"), "sshi-title"))
             add(label(tr("По вашему запросу ничего не найдено.", "No matching connections.") if self.profiles else
-                      tr("Сохраните имя, пользователя SSH и Endpoint ID удалённого компьютера.", "Save a name, SSH user and Endpoint ID for the remote computer."), wrap=True))
+                      tr("Начните с приглашения от владельца компьютера или добавьте уже разрешённое подключение.", "Start with an invitation from the computer’s owner or add an authorized connection."), wrap=True))
             if not self.profiles:
                 button = action(tr("Новое подключение", "New connection"), lambda: self.edit(), "list-add-symbolic")
                 button.set_halign(Gtk.Align.START)
                 add(styled(button, "suggested-action", "sshi-primary"))
         else:
-            destination = p["user"] + "@" + p["endpoint"]
             add(label(p["name"], "sshi-title"))
             card = styled(Gtk.Grid(column_spacing=18, row_spacing=10), "sshi-card")
             for index, (title, value) in enumerate([(tr("SSH-логин", "SSH user"), p["user"]), ("Endpoint ID", p["endpoint"]),
@@ -602,7 +875,7 @@ class Window(Gtk.Window):
             tools = Gtk.Grid(column_spacing=9, row_spacing=9)
             items = [
                 (tr("Ввести приглашение…", "Redeem invite…"), "mail-read-symbolic",
-                 lambda: self.run_profile(p, ["copy-iid", "--invite", destination])),
+                 lambda: ConnectionDialog(self, p).present_form()),
                 (tr("Создать приглашение…", "Create invite…"), "mail-send-symbolic", lambda: self.invite(p)),
                 (tr("Установить SSH-ключ…", "Install SSH key…"), "changes-prevent-symbolic", lambda: self.ssh_key(p)),
                 (tr("Пробросить порт…", "Forward a port…"), "network-wired-symbolic", lambda: self.forward(p)),
@@ -678,6 +951,9 @@ class Window(Gtk.Window):
         dialog.destroy()
 
     def edit(self, p=None, initial=None):
+        if not p and not initial:
+            ConnectionDialog(self).present_form()
+            return
         old = p or initial or {}
         def save(name, user, endpoint, relay):
             args = ["profile", "save", "--name", name, "--user", user, "--endpoint", endpoint]
@@ -731,7 +1007,7 @@ class Window(Gtk.Window):
         relay = action(tr("Настройки relay…", "Relay settings…"), lambda: self.safe(lambda: self.relay_settings(dialog)),
                        "network-server-symbolic")
         grid.attach(relay, 0, 1, 2, 1)
-        release = Gtk.LinkButton.new_with_label(RELEASE_URL, tr("Что нового в 0.2.1", "What’s new in 0.2.1"))
+        release = Gtk.LinkButton.new_with_label(RELEASE_URL, tr("Что нового в 0.2.2", "What’s new in 0.2.2"))
         release.set_halign(Gtk.Align.START)
         grid.attach(release, 0, 2, 2, 1)
         dialog.show_all()
@@ -801,7 +1077,7 @@ class Window(Gtk.Window):
 
     def invite(self, p):
         def issue(client, owner):
-            args = ["issue-invite", "--name", p["name"], "--client", client]
+            args = ["issue-invite", "--share", "--name", p["name"], "--client", client]
             if owner:
                 args.extend(["--service-user", owner])
             open_terminal(args, True)
@@ -809,6 +1085,33 @@ class Window(Gtk.Window):
             (tr("Endpoint ID нового ПК", "New computer’s Endpoint ID"), "", tr("64 символа", "64 characters"), False),
             (tr("Пользователь службы", "Service user"), "", p["user"], False),
         ], issue, primary=tr("Создать", "Create"))
+
+    def invite_local(self, parent=None):
+        def issue(client, user):
+            link = cli("invite", client.strip(), "--share", "--user", user.strip())
+            result = Gtk.Dialog(title=tr("Приглашение готово", "Invitation ready"),
+                                transient_for=parent or self, modal=True)
+            result.add_buttons(tr("Готово", "Done"), Gtk.ResponseType.CLOSE)
+            body = box(True, 12)
+            body.set_border_width(18)
+            result.get_content_area().add(body)
+            body.add(label(tr("Отправьте ссылку владельцу приглашённого компьютера. Она действует 10 минут.",
+                              "Send the link to the invited computer’s owner. It is valid for 10 minutes."), wrap=True))
+            feedback = label("")
+            def copy():
+                clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+                clipboard.set_text(link, -1)
+                clipboard.store()
+                feedback.set_text(tr("Ссылка скопирована.", "Link copied."))
+            body.add(action(tr("Скопировать приглашение", "Copy invitation"), copy, "edit-copy-symbolic"))
+            body.add(feedback)
+            result.show_all()
+            result.run()
+            result.destroy()
+        self.fields(tr("Пригласить на этот компьютер", "Invite to this computer"), [
+            (tr("Endpoint ID гостя", "Guest Endpoint ID"), "", tr("ID компьютера гостя", "The guest computer’s ID"), False),
+            (tr("Пользователь SSH", "SSH user"), getpass.getuser(), "", False),
+        ], issue, primary=tr("Создать приглашение", "Create invitation"), parent=parent)
 
     def ssh_key(self, p):
         def install(path):

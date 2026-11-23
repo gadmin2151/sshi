@@ -1,16 +1,11 @@
-use std::{
-    io::{self, IsTerminal},
-    os::unix::process::CommandExt,
-    path::PathBuf,
-    process::Command,
-};
+use std::{os::unix::process::CommandExt, path::PathBuf, process::Command};
 
 use anyhow::{Context, Result, ensure};
 use clap::{Args, Parser};
 use iroh::EndpointId;
-use iroh_ssh::{allow_client_command, invite::Code, run_async};
+use iroh_ssh::allow_client_command;
 
-use crate::{Destination, proxy, quoted_sshi_executable, ssh_over_iroh, state::State};
+use crate::{Destination, invitation_cli, quoted_sshi_executable, ssh_over_iroh, state::State};
 
 #[derive(Parser)]
 #[command(
@@ -48,17 +43,11 @@ pub fn run(copy: CopyIid) -> Result<()> {
             .destination
             .parse()
             .context("--invite needs a receiver in USER@ENDPOINT_ID form")?;
-        let text = if io::stdin().is_terminal() {
-            rpassword::prompt_password("Iroh invitation: ")?
-        } else {
-            let mut text = String::new();
-            io::stdin().read_line(&mut text)?;
-            text
-        };
-        let code: Code = text.parse()?;
-        run_async(proxy::redeem(State::load()?, destination.endpoint, code))?;
-        println!("Invitation accepted for this computer");
-        return Ok(());
+        return invitation_cli::redeem(
+            &invitation_cli::read_input()?,
+            Some(destination.endpoint),
+            None,
+        );
     }
     let id = match copy.client_id {
         Some(id) => id,
@@ -70,7 +59,7 @@ pub fn run(copy: CopyIid) -> Result<()> {
                 copy.port.is_none(),
                 "-p is only for direct SSH destinations"
             );
-            let mut ssh = ssh_over_iroh(destination.endpoint, &quoted_sshi_executable()?);
+            let mut ssh = ssh_over_iroh(destination.endpoint, &quoted_sshi_executable()?, None);
             ssh.arg("-l").arg(destination.user);
             (ssh, destination.endpoint.to_string())
         }

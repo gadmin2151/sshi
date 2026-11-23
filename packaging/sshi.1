@@ -1,4 +1,4 @@
-.TH SSHI 1 "2026-11-23" "SSHI 0.2.1" "User Commands"
+.TH SSHI 1 "2026-11-23" "SSHI 0.2.2" "User Commands"
 .SH NAME
 sshi, sshi-copy-id, sshi-copy-iid \- use OpenSSH over an iroh relay
 .SH SYNOPSIS
@@ -51,6 +51,12 @@ iroh Endpoint ID. The tunnel uses the configured iroh relay for all traffic
 between the two computers. OpenSSH performs login authentication and host key
 verification. The receiving computer runs an OpenSSH server on its loopback
 interface. The SSH account is the part of the destination before the at sign.
+If the receiver declines the initiating Endpoint ID during an interactive login,
+sshi shows the client's public ID and prompts for an invitation code or link.
+After the invitation is accepted, SSH login continues. Press Enter at the empty
+prompt to cancel. For scripts, use the invitation redeem command explicitly.
+An OpenSSH ConnectTimeout also limits the time available to enter a code
+during login. Use the separate invitation redeem command when awaiting a code.
 Multiple SSH sessions to the same receiver use a common iroh tunnel with
 receivers that support it. The tunnel closes after the last session ends.
 .SH COMMANDS
@@ -120,10 +126,28 @@ Remove the user's relay override and return to inherited settings.
 Read the token from a hidden prompt or standard input. Store it in the
 current user's private configuration directory for this relay.
 .TP
-.B issue-invite \-\-name NAME \-\-client ID [\-\-service-user USER]
+.B issue-invite \-\-name NAME \-\-client ID [\-\-service-user USER] [\-\-share]
 Use an existing authorized connection to issue an invitation on its receiver.
 Specify the receiver service account when it differs from the SSH account.
 The remote Endpoint ID is checked before issuing a code.
+With
+.B \-\-share
+print a full invitation link including the profile's SSH user and relay.
+.TP
+.B invite CLIENT_ID \-\-share \-\-user SSH_USER [\-\-relay URL]
+Issue a targeted invitation on this receiver and print a single SSHI link.
+Share it with the owner of the invited client. The link includes the receiver
+Endpoint ID, SSH username, relay URL and invitation code.
+.TP
+.B invitation inspect
+Read a shared link from standard input and print its public connection fields
+as JSON. The invitation code is omitted.
+.TP
+.B invitation redeem [\-\-endpoint RECEIVER_ID] [\-\-relay URL]
+Enter the link at the hidden prompt or pipe it to standard input. For a
+standalone invitation code, specify the receiver Endpoint ID. The receiver
+verifies the client identity and the code. After acceptance, connect with
+the receiver's SSH username and your normal SSH key or password.
 .TP
 .B copy-iid
 Authorize a public iroh Endpoint ID on a receiver.

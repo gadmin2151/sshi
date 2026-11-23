@@ -29,37 +29,80 @@ use tokio::{
 
 use crate::{config::Config, state::State};
 
-pub async fn connect(state: State, peer: EndpointId) -> Result<()> {
+pub async fn connect(state: State, peer: EndpointId, invite_user: Option<&str>) -> Result<()> {
     let client = state.id()?;
-    let mut stream = open_local(&state).await?;
-    if let Err(error) = local::request(&mut stream, client, peer).await {
-        if !local::was_closed(&error) {
-            return Err(error);
+    let (relay, token) = Config::load()?.relay()?;
+    let token = token.as_deref();
+    let opened = open_ssh(&state, client, peer, &relay, token).await;
+    let stream = match (opened, invite_user) {
+        (Err(error), Some(user))
+            if error.is::<tunnel::ClientNotAllowed>()
+                && crate::login_invite::enabled(user, peer) =>
+        {
+            let prompt = crate::login_invite::Prompt::new();
+            let code = prompt.read(client, user, peer, &relay)?;
+            redeem_on(&state, peer, code, &relay, token)
+                .await
+                .with_context(|| prompt.declined())?;
+            eprintln!("{}", prompt.accepted());
+            open_ssh(&state, client, peer, &relay, token).await?
         }
-        stream = open_local(&state).await?;
-        local::request(&mut stream, client, peer).await?;
-    }
+        (result, _) => result?,
+    };
     let (recv, send) = stream.into_split();
     tunnel::proxy_stdio(recv, send).await
 }
 
-pub async fn redeem(state: State, peer: EndpointId, code: Code) -> Result<()> {
+async fn open_ssh(
+    state: &State,
+    client: EndpointId,
+    peer: EndpointId,
+    relay: &RelayUrl,
+    token: Option<&str>,
+) -> Result<UnixStream> {
+    let mut stream = open_local(state, relay, token).await?;
+    if let Err(error) = local::request(&mut stream, client, peer).await {
+        if !local::was_closed(&error) {
+            return Err(error);
+        }
+        stream = open_local(state, relay, token).await?;
+        local::request(&mut stream, client, peer).await?;
+    }
+    Ok(stream)
+}
+
+pub async fn redeem(
+    state: State,
+    peer: EndpointId,
+    code: Code,
+    relay: Option<&RelayUrl>,
+) -> Result<()> {
+    let (relay, token) = Config::load()?.relay_for(relay)?;
     state.id()?;
-    let mut stream = open_local(&state).await?;
+    redeem_on(&state, peer, code, &relay, token.as_deref()).await
+}
+
+async fn redeem_on(
+    state: &State,
+    peer: EndpointId,
+    code: Code,
+    relay: &RelayUrl,
+    token: Option<&str>,
+) -> Result<()> {
+    let mut stream = open_local(state, relay, token).await?;
     let result = local::redeem(&mut stream, peer, &code).await;
     match result {
         Err(error) if local::was_closed(&error) => {
-            let mut stream = open_local(&state).await?;
+            let mut stream = open_local(state, relay, token).await?;
             local::redeem(&mut stream, peer, &code).await
         }
         result => result,
     }
 }
 
-async fn open_local(state: &State) -> Result<UnixStream> {
+async fn open_local(state: &State, relay: &RelayUrl, token: Option<&str>) -> Result<UnixStream> {
     let path = state.socket();
-    let (relay, token) = Config::load()?.relay()?;
-    let route = route_hash(&relay, token.as_deref());
+    let route = route_hash(relay, token);
     if let Some(stream) = local_socket(&path, &route).await? {
         return Ok(stream);
     }
@@ -68,6 +111,7 @@ async fn open_local(state: &State) -> Result<UnixStream> {
         return Ok(stream);
     }
     let mut process = Command::new(env::current_exe()?)
+        .env(crate::profiles::PROFILE_RELAY, relay.as_str())
         .arg("__broker")
         .process_group(0)
         .stdin(Stdio::null())

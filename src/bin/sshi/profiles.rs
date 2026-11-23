@@ -3,7 +3,13 @@ use anyhow::{Context, Result, ensure};
 use clap::Subcommand;
 use iroh::EndpointId;
 use iroh_ssh::profiles::Profile;
-use std::{env, ffi::OsString, os::unix::process::CommandExt, process::Command};
+use std::{
+    env,
+    ffi::OsString,
+    io::Read,
+    os::unix::process::CommandExt,
+    process::{Command, Stdio},
+};
 
 pub const PROFILE_RELAY: &str = "SSHI_PROFILE_RELAY_URL";
 
@@ -143,15 +149,46 @@ pub fn connect(name: &str, remote_command: Vec<OsString>) -> Result<()> {
     .context("run saved connection")
 }
 
-pub fn invite(name: &str, client: EndpointId, service_user: Option<&str>) -> Result<()> {
+pub fn invite(
+    name: &str,
+    client: EndpointId,
+    service_user: Option<&str>,
+    share: bool,
+) -> Result<()> {
     let p = lookup(name)?;
     let service_user = service_user.filter(|u| *u != p.user);
     let remote = iroh_ssh::issue_invitation_command(p.endpoint, client, service_user)?;
-    Err(command(&p)?
-        .arg("-T")
-        .arg("--")
-        .arg(p.destination())
-        .arg(remote)
-        .exec())
-    .context("issue invitation over iroh")
+    let mut ssh = command(&p)?;
+    ssh.args(["-T", "--"]).arg(p.destination()).arg(remote);
+    if !share {
+        return Err(ssh.exec()).context("issue invitation over iroh");
+    }
+    let route = crate::invitation_cli::share_route(
+        p.endpoint,
+        &p.user,
+        (!p.relay.is_empty()).then_some(p.relay.as_str()),
+    )?;
+    // Older receivers return a raw code. Keep OpenSSH's authentication and host-key
+    // prompts on the user's terminal and only capture the receiver's stdout.
+    let mut child = ssh
+        .stdout(Stdio::piped())
+        .spawn()
+        .context("issue invitation over iroh")?;
+    let mut output = String::new();
+    let response = child
+        .stdout
+        .take()
+        .expect("piped stdout")
+        .take(1025)
+        .read_to_string(&mut output);
+    let status = child.wait()?;
+    ensure!(status.success(), "receiver did not issue an invitation");
+    response.context("read invitation from receiver")?;
+    ensure!(
+        output.len() <= 1024,
+        "unexpected invitation response from receiver"
+    );
+    let code = output.parse()?;
+    println!("{}", iroh_ssh::invite::SharedInvitation { route, code });
+    Ok(())
 }

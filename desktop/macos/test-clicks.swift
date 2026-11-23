@@ -49,7 +49,7 @@ struct TestProfileClicks {
         precondition(AppLanguage.current(in: defaults) == .russian)
         defaults.set("en", forKey: AppLanguage.preferenceKey)
         let restored = AppLanguage.current(in: UserDefaults(suiteName: suite)!)
-        precondition(restored == .english && restored.whatsNew == "What’s new in 0.2.1")
+        precondition(restored == .english && restored.whatsNew == "What’s new in 0.2.2")
         precondition(ForwardKind.remote.title(restored) == "Access from there")
         precondition(AppLanguage.russian.commandError("Error: duplicate connection name 'old'").contains("уже существует"))
         precondition(restored.commandError("Error: invalid SSH username").contains("Check the SSH username"))
@@ -58,7 +58,87 @@ struct TestProfileClicks {
     }
 
     @MainActor
-    static func main() throws {
+    static func testInvitations() async throws {
+        let peer = String(repeating: "ab", count: 32)
+        let code = String(repeating: "42", count: 32)
+        let relay = "https://relay.example.org/"
+        let link = "sshi://invite/v1?endpoint=\(peer)&user=pi&relay=https%3A%2F%2Frelay.example.org%2F#\(code)"
+        let info = try JSONSerialization.data(withJSONObject: ["user": "pi", "endpoint": peer, "relay": relay])
+        var calls: [([String], String?)] = []
+        var others: [Profile] = []
+        var deny = false
+        var saveFails = false
+        let run: InvitationEntry.Runner = { args, input in
+            calls.append((args, input))
+            switch Array(args.prefix(2)) {
+            case ["invitation", "inspect"]: return info
+            case ["profile", "list"]: return try JSONEncoder().encode(others)
+            case ["invitation", "redeem"] where deny: throw ClientError(message: "Invitation denied")
+            case ["profile", "save"] where saveFails: throw ClientError(message: "Could not save")
+            default: return Data()
+            }
+        }
+        let raw = InvitationEntry(run: run)
+        raw.changeEndpoint(peer)
+        precondition(raw.name == String(peer.prefix(12)), "propose a name for a pasted receiver")
+        raw.user = "pi"
+        raw.relay = relay
+        raw.name = "Home"
+        raw.changeInput(code)
+        precondition(!raw.needsPreview, "legacy code uses the separately entered receiver")
+        others = [Profile(name: "HOME", user: "another", endpoint: peer, relay: relay)]
+        do {
+            _ = try await raw.finish(invited: true, language: .english)
+            preconditionFailure("must not overwrite an existing connection")
+        } catch { precondition(calls.map { $0.0.first } == ["profile"]) }
+        others = []
+        raw.token = "private-test-token"
+        deny = true
+        do {
+            _ = try await raw.finish(invited: true, language: .english)
+            preconditionFailure("must not save a denied invitation")
+        } catch { precondition(error.localizedDescription.contains("declined") && raw.input == code && !raw.granted) }
+        precondition(calls.contains { $0.0 == ["config", "set-token", "--relay", relay] && $0.1 == "private-test-token\n" })
+        precondition(calls.last?.0 == ["invitation", "redeem", "--endpoint", peer, "--relay", relay] && calls.last?.1 == code + "\n")
+        deny = false
+        saveFails = true
+        do {
+            _ = try await raw.finish(invited: true, language: .english)
+            preconditionFailure("test save must fail")
+        } catch { precondition(raw.granted && raw.input.isEmpty) }
+        let previous = calls.count
+        raw.name = "Pi"
+        saveFails = false
+        let name = try await raw.finish(invited: true, language: .english)
+        precondition(name == "Pi" && calls.dropFirst(previous).allSatisfy { $0.0.first == "profile" })
+
+        let full = InvitationEntry(run: run)
+        full.relay = "https://previous-relay.example.org/"
+        full.token = "token-for-previous-relay"
+        full.changeInput(link)
+        precondition(full.needsPreview)
+        try await full.inspect(.english)
+        precondition(full.user == "pi" && full.relay == relay && full.endpoint == peer && !full.needsPreview)
+        precondition(full.token.isEmpty, "a token must not move to another invitation’s relay")
+        precondition(calls.last?.0 == ["invitation", "inspect"] && calls.last?.1 == link + "\n")
+        full.name = "Pi from link"
+        _ = try await full.finish(invited: true, language: .english)
+        precondition(calls.contains { $0.0 == ["invitation", "redeem"] && $0.1 == link + "\n" })
+        precondition(calls.last?.0 == ["profile", "save", "--name", "Pi from link", "--user", "pi",
+                                       "--endpoint", peer, "--relay", relay])
+        precondition(!calls.flatMap { $0.0 }.contains { $0.contains(code) || $0.contains("private-test-token") })
+        precondition(!calls.contains { $0.1?.contains("token-for-previous-relay") == true })
+        print("Invitation preview, paste, profile conflicts, denial and retry after grant passed")
+    }
+
+    @MainActor
+    static func main() async throws {
+        try await testInvitations()
+        try runWindowTests()
+    }
+
+    @MainActor
+    static func runWindowTests() throws {
         try testForwarding()
         testLanguage()
         print("Forwarding arguments, address preview, validation and persistent language passed")

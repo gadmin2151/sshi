@@ -12,7 +12,8 @@ use anyhow::{Context, Result, bail, ensure};
 use iroh::EndpointId;
 use iroh_ssh::{
     RELAY_TOKEN_ENV, RELAY_URL_ENV, allow_client_command, env_value, install_ssh_key_command,
-    invite::Code, issue_invitation_command, relay_url, tunnel,
+    invite::{Code, SharedInvitation},
+    issue_invitation_command, relay_url, tunnel,
 };
 use russh::{
     ChannelMsg, Disconnect, MethodKind,
@@ -27,8 +28,9 @@ use windows_sys::Win32::{
         ATTACH_PARENT_PROCESS, AllocConsole, AttachConsole, CONSOLE_SCREEN_BUFFER_INFO,
         ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT, ENABLE_PROCESSED_INPUT, ENABLE_PROCESSED_OUTPUT,
         ENABLE_VIRTUAL_TERMINAL_INPUT, ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleMode,
-        GetConsoleScreenBufferInfo, GetConsoleWindow, GetStdHandle, STD_INPUT_HANDLE,
-        STD_OUTPUT_HANDLE, SetConsoleCP, SetConsoleMode, SetConsoleOutputCP, SetConsoleTitleW,
+        GetConsoleScreenBufferInfo, GetConsoleWindow, GetStdHandle, STD_ERROR_HANDLE,
+        STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, SetConsoleCP, SetConsoleMode, SetConsoleOutputCP,
+        SetConsoleTitleW,
     },
 };
 
@@ -64,9 +66,13 @@ pub fn open_window(title: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn has_console_input() -> bool {
+fn is_console(which: u32) -> bool {
     let mut mode = 0;
-    (unsafe { GetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), &mut mode) }) != 0
+    (unsafe { GetConsoleMode(GetStdHandle(which), &mut mode) }) != 0
+}
+
+pub fn has_console_input() -> bool {
+    is_console(STD_INPUT_HANDLE)
 }
 
 pub fn open_command_window() -> Result<bool> {
@@ -99,7 +105,18 @@ pub async fn connect(
         )
     );
     let outcome = async {
-        let stream = broker::connect(&store, &route, profile.endpoint).await?;
+        let offer_invitation = interactive
+            && matches!(action, RelayAction::Shell)
+            && has_console_input()
+            && is_console(STD_ERROR_HANDLE)
+            && is_console(STD_OUTPUT_HANDLE);
+        let stream = match broker::connect(&store, &route, profile.endpoint).await {
+            Err(error) if offer_invitation && error.is::<tunnel::ClientNotAllowed>() => {
+                redeem_at_first_login(&store, &profile, &route).await?;
+                broker::connect(&store, &route, profile.endpoint).await?
+            }
+            attempt => attempt?,
+        };
         let config = client::Config {
             keepalive_interval: Some(Duration::from_secs(30)),
             ..Default::default()
@@ -149,15 +166,15 @@ pub async fn connect(
         let _ = ssh.disconnect(Disconnect::ByApplication, "", "").await;
         if let Some(code) = result? {
             if interactive {
-                if let Err(error) =
-                    window::show_invitation(unsafe { GetConsoleWindow() }, &code.to_string())
-                {
-                    println!(
-                        "{}",
-                        tr_format!("Код приглашения\n{code}", "Invitation code\n{code}")
-                    );
-                    return Err(error);
-                }
+                let invitation = iroh_ssh::invite::SharedInvitation {
+                    route: iroh_ssh::invite::InvitationRoute::new(
+                        profile.endpoint,
+                        &profile.user,
+                        Some(&route.relay),
+                    )?,
+                    code,
+                };
+                window::show_invitation(unsafe { GetConsoleWindow() }, &invitation.to_string())?;
             } else {
                 println!("{code}");
             }
@@ -182,6 +199,70 @@ pub async fn connect(
     })
 }
 
+async fn redeem_at_first_login(store: &Store, profile: &Profile, route: &Route) -> Result<()> {
+    let id = store.identity()?.public();
+    eprintln!(
+        "{}",
+        tr_format!(
+            "Получатель ещё не разрешил этот компьютер. Ваш Endpoint ID:\n{id}\nПередайте его владельцу получателя. На получателе можно выполнить `sshi invite {id}` или создать приглашение через авторизованный клиент.",
+            "The receiver has not authorized this computer yet. Your endpoint ID:\n{id}\nGive it to the receiver’s owner. They can run `sshi invite {id}` on the receiver or create an invitation from an authorized client."
+        )
+    );
+    let input = prompt(
+        tr(
+            "Код или ссылка приглашения (Enter — отмена): ",
+            "Invitation code or link (Enter to cancel): ",
+        )
+        .into(),
+        false,
+        true,
+    )
+    .await?;
+    ensure!(
+        !input.trim().is_empty(),
+        tr("Вход отменён.", "Connection canceled.")
+    );
+    let code = invitation_for_profile(&input, profile, route)?;
+    broker::redeem(store, route, profile.endpoint, code).await.context(tr("Не удалось принять приглашение. Проверьте срок действия и Endpoint ID приглашённого компьютера.", "Could not redeem the invitation. Check its expiry and the invited computer’s endpoint ID."))?;
+    eprintln!(
+        "{}",
+        tr(
+            "Доступ разрешён. Подключение к SSH…",
+            "Access granted. Connecting to SSH…"
+        )
+    );
+    Ok(())
+}
+
+fn invitation_for_profile(input: &str, profile: &Profile, route: &Route) -> Result<Code> {
+    let input = input.trim();
+    if !input.starts_with("sshi:") {
+        return input.parse().context(tr(
+            "Ожидался 64-значный код или ссылка приглашения.",
+            "Expected a 64-character code or an invitation link.",
+        ));
+    }
+    let invitation: SharedInvitation = input.parse().context(tr(
+        "Проверьте ссылку приглашения.",
+        "Check the invitation link.",
+    ))?;
+    let relay = relay_url(&route.relay)?;
+    ensure!(
+        invitation.route.endpoint == profile.endpoint
+            && invitation.route.user == profile.user
+            && invitation
+                .route
+                .relay
+                .as_ref()
+                .is_none_or(|included| included == &relay),
+        tr(
+            "Получатель, пользователь SSH или relay в ссылке отличаются от текущего подключения. Откройте ссылку в окне приглашений и проверьте адрес.",
+            "The link specifies a different receiver, SSH user or relay. Open it in the invitation window and review the destination."
+        )
+    );
+    Ok(invitation.code)
+}
+
 pub async fn enroll(store: Store, profile: Profile, interactive: bool) -> Result<()> {
     let id = store.identity()?.public();
     eprintln!(
@@ -193,14 +274,13 @@ pub async fn enroll(store: Store, profile: Profile, interactive: bool) -> Result
         )
     );
     let route = relay_route(&profile)?;
-    let code: Code = prompt(
-        tr("Код приглашения: ", "Invitation code: ").into(),
+    let input = prompt(
+        tr("Код или ссылка приглашения: ", "Invitation code or link: ").into(),
         false,
         interactive,
     )
-    .await?
-    .parse()
-    .context(tr("Проверьте код приглашения", "Check the invitation code"))?;
+    .await?;
+    let code = invitation_for_profile(&input, &profile, &route)?;
     broker::redeem(&store, &route, profile.endpoint, code)
         .await
         .context(tr(
@@ -240,6 +320,16 @@ pub async fn issue_invite(store: Store, profile: Profile, interactive: bool) -> 
         interactive,
     )
     .await?;
+    issue_to(store, profile, interactive, client, &account).await
+}
+
+pub async fn issue_to(
+    store: Store,
+    profile: Profile,
+    interactive: bool,
+    client: EndpointId,
+    account: &str,
+) -> Result<()> {
     let account = account.trim();
     ensure!(
         !account.starts_with('-')
@@ -300,7 +390,7 @@ pub fn default_relay() -> Result<String> {
     Ok(env_value(RELAY_URL_ENV)?.unwrap_or_else(|| DEFAULT_RELAY.to_owned()))
 }
 
-fn relay_route(profile: &Profile) -> Result<Route> {
+pub(crate) fn relay_route(profile: &Profile) -> Result<Route> {
     let default = relay_url(&default_relay()?)
         .context(tr("Проверьте IROH_RELAY_URL", "Check IROH_RELAY_URL"))?;
     let relay = if profile.relay.is_empty() {
@@ -634,13 +724,13 @@ fn clean_prompt(text: &str) -> String {
 
 async fn prompt(message: String, echo: bool, interactive: bool) -> Result<String> {
     tokio::task::spawn_blocking(move || {
-        eprint!("{message}");
-        io::stderr().flush()?;
         let hidden = if !echo && interactive {
             Some(ConsoleMode::change(STD_INPUT_HANDLE, ENABLE_ECHO_INPUT, 0)?)
         } else {
             None
         };
+        eprint!("{message}");
+        io::stderr().flush()?;
         let mut value = String::new();
         let count = io::stdin().read_line(&mut value)?;
         drop(hidden);

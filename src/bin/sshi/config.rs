@@ -114,7 +114,7 @@ impl Config {
         Ok(())
     }
 
-    fn default_relay(&self) -> Result<Option<String>> {
+    pub fn default_relay(&self) -> Result<Option<String>> {
         if let Some(url) = env_value(RELAY_URL_ENV)? {
             return Ok(Some(url));
         }
@@ -125,11 +125,21 @@ impl Config {
     }
 
     pub fn relay(&self) -> Result<(RelayUrl, Option<String>)> {
+        self.relay_for(None)
+    }
+
+    /// Resolve a route with the same credential scoping used for saved profiles.
+    pub fn relay_for(&self, override_url: Option<&RelayUrl>) -> Result<(RelayUrl, Option<String>)> {
         let base = self.default_relay()?;
-        let selected = env_value(crate::profiles::PROFILE_RELAY)?
-            .or_else(|| base.clone())
-            .context("no relay configured; use sshi config set-relay URL")?;
-        let url = relay_url(&selected).context("invalid relay_url")?;
+        let url = match override_url {
+            Some(url) => url.clone(),
+            None => {
+                let selected = env_value(crate::profiles::PROFILE_RELAY)?
+                    .or_else(|| base.clone())
+                    .context("no relay configured; use sshi config set-relay URL")?;
+                relay_url(&selected).context("invalid relay_url")?
+            }
+        };
         let layout = self.token_source(&url, base.as_deref())?;
         let token = match layout {
             TokenSource::Environment => env_value(RELAY_TOKEN_ENV)?,

@@ -2,6 +2,7 @@
 import concurrent.futures
 import contextlib
 import http.server
+import json
 import os
 import pathlib
 import re
@@ -10,6 +11,8 @@ import subprocess
 import tempfile
 import threading
 import time
+
+from login_pty import first_login
 
 if not pathlib.Path("/.dockerenv").exists() or os.geteuid() != 0:
     raise SystemExit("Run in a disposable Debian container as root")
@@ -150,6 +153,41 @@ with tempfile.TemporaryDirectory(prefix="sshi.") as tmp:
             denied = run([*sshi, destination, "true"], env=guest)
             check(denied, "revoked invitation", denied.returncode == 255 and b"not allowed" in denied.stderr)
             print("Targeted invitation, post-enrollment SSH and revocation: pass", flush=True)
+
+            # A fresh desktop can start with just two pasted fields or one complete link.
+            config = base / "unused-default.toml"
+            config.write_text('relay_url = "http://127.0.0.1:1/"\n')
+            alternate = dict(guest, SSHI_CONFIG=str(config))
+            for full_link in (False, True):
+                issue = ["sshi", "invite", guest_id]
+                accept = ["sshi", "invitation", "redeem"]
+                if full_link:
+                    issue += ["--share", "--user", "root"]
+                else:
+                    accept += ["--endpoint", receiver_id, "--relay", relay]
+                grant = check(run(issue, env=receiver), "issue targeted guest grant")
+                if full_link:
+                    preview = subprocess.run(["sshi", "invitation", "inspect"], env=alternate,
+                                             input=grant, capture_output=True, timeout=15)
+                    assert json.loads(check(preview, "public route preview")) == {
+                        "user": "root", "endpoint": receiver_id, "relay": relay}
+                wrong = subprocess.run(accept, env=initiator, input=grant, capture_output=True, timeout=35)
+                assert wrong.returncode and b"invitation denied" in wrong.stderr
+                accepted = subprocess.run(accept, env=alternate, input=grant, capture_output=True, timeout=35)
+                check(accepted, "accept through specified relay")
+                assert check(run([*sshi, destination, "printf guest"], env=guest), "enrolled SSH") == b"guest"
+                check(run(["sshi", "revoke-invite", guest_id], env=receiver), "revoke guest access")
+            print("Separate receiver ID/code and share link both enroll the intended desktop: pass", flush=True)
+            cli_config = pathlib.Path("/etc/ssh/ssh_config.d/10-sshi-smoke.conf")
+            batch = cli_config.read_text()
+            try:
+                cli_config.write_text(batch.replace("BatchMode yes", "BatchMode no").replace("ConnectTimeout 20", "ConnectTimeout 45"))
+                grant = check(run(["sshi", "invite", guest_id], env=receiver), "issue first-login grant")
+                first_login([*sshi, destination], dict(guest, LC_ALL="C", TERM="dumb"), grant, guest_id,
+                            b"Invitation code or link (Enter to cancel): ")
+            finally:
+                cli_config.write_text(batch)
+            print("Interactive first SSH login accepted a hidden invitation and continued to a shell: pass", flush=True)
 
             failed = run(["sshi", "-i", str(base / "wrong"), destination, "true"], env=initiator)
             check(failed, "SSH auth rejection", failed.returncode == 255 and b"Permission denied" in failed.stderr)

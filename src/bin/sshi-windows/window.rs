@@ -72,6 +72,8 @@ const FORWARD: u16 = 115;
 const LANG_RU: u16 = 116;
 const LANG_EN: u16 = 117;
 const WHATS_NEW: u16 = 118;
+const EMPTY_JOIN: u16 = 119;
+const MANUAL: u16 = 120;
 const APP_MENU_RESOURCE: usize = 3;
 const STYLE: u32 = WS_OVERLAPPEDWINDOW;
 
@@ -84,6 +86,9 @@ struct Controls {
     title: HWND,
     caption: HWND,
     list: HWND,
+    empty_help: HWND,
+    empty_join: HWND,
+    empty_manual: HWND,
     name: HWND,
     user: HWND,
     endpoint: HWND,
@@ -482,6 +487,12 @@ impl View {
                 LVS_EX_FULLROWSELECT as LPARAM,
             );
         }
+        self.controls.empty_help = self.label(hwnd, "Чтобы подключиться, используйте приглашение от владельца сервера или введите адрес вручную.", [29, 146, 219, 78])?;
+        self.controls.empty_join =
+            self.button(hwnd, "По приглашению…", [29, 230, 219, 30], EMPTY_JOIN)?;
+        self.controls.empty_manual =
+            self.button(hwnd, "Ввести вручную…", [29, 269, 219, 30], MANUAL)?;
+        self.show_empty_state();
         self.button(hwnd, "Новое", [22, 490, 110, 29], NEW)?;
         self.button(hwnd, "Удалить", [148, 490, 110, 29], DELETE)?;
 
@@ -718,13 +729,53 @@ impl View {
                     )
                 );
             }
-            NEW => self.new_profile(),
+            NEW | EMPTY_JOIN | ENROLL => {
+                let previous = if id == ENROLL {
+                    self.selected.and_then(|i| self.profiles.get(i))
+                } else {
+                    None
+                };
+                match crate::join_dialog::show(hwnd, &self.store, self.id, previous)? {
+                    crate::join_dialog::Outcome::Manual => self.new_profile(),
+                    crate::join_dialog::Outcome::Saved { name, open } => {
+                        self.profiles = self.store.profiles()?;
+                        let i = self
+                            .profiles
+                            .iter()
+                            .position(|p| p.name == name)
+                            .context(tr("Подключение отсутствует", "Connection not found"))?;
+                        self.refresh_list(Some(i));
+                        self.select(i)?;
+                        self.status(tr(
+                            "Доступ разрешён. Подключение сохранено.",
+                            "Access granted. Connection saved.",
+                        ));
+                        if open {
+                            self.connect()?;
+                        }
+                    }
+                    crate::join_dialog::Outcome::Closed => {}
+                }
+            }
+            MANUAL => self.new_profile(),
             DELETE => self.delete(hwnd)?,
             SAVE => self.save()?,
             CONNECT => self.connect()?,
-            ENROLL => self.spawn_terminal("--enroll")?,
             INSTALL_SSH_KEY => self.spawn_terminal("--copy-ssh-key")?,
-            ISSUE_INVITE => self.spawn_terminal("--issue-invite")?,
+            ISSUE_INVITE => {
+                if text(self.controls.endpoint).trim().is_empty() {
+                    self.status(tr("Приглашение создаёт получатель или уже авторизованный клиент. Отправьте владельцу получателя свой Endpoint ID.", "The receiver or an authorized client issues invitations. Send your endpoint ID to the receiver’s owner."));
+                } else {
+                    let profile = self.form()?;
+                    if let Some((guest, account)) = crate::join_dialog::issue(hwnd, &profile)? {
+                        self.launch_terminal(
+                            profile,
+                            "--issue-invite",
+                            &[&guest.to_string(), &account],
+                        )?;
+                    }
+                }
+            }
             FORWARD => {
                 let profile = self.form()?;
                 if let Some(spec) = crate::forward_dialog::show(hwnd, &profile.name)? {
@@ -877,7 +928,22 @@ impl View {
         }
     }
 
+    fn show_empty_state(&self) {
+        let empty = self.profiles.is_empty();
+        unsafe {
+            ShowWindow(self.controls.list, if empty { SW_HIDE } else { SW_SHOW });
+            for control in [
+                self.controls.empty_help,
+                self.controls.empty_join,
+                self.controls.empty_manual,
+            ] {
+                ShowWindow(control, if empty { SW_SHOW } else { SW_HIDE });
+            }
+        }
+    }
+
     fn refresh_list(&mut self, selected: Option<usize>) {
+        self.show_empty_state();
         self.clicked = None;
         self.rename_armed = false;
         unsafe { SendMessageW(self.controls.list, LVM_DELETEALLITEMS, 0, 0) };
@@ -1210,11 +1276,11 @@ unsafe extern "system" fn invitation_dialog(
                 (
                     2003,
                     tr(
-                        "Код действует 10 минут.",
-                        "The code is valid for 10 minutes.",
+                        "Отправьте эту ссылку приглашённому компьютеру. Ссылка действует 10 минут.",
+                        "Send this link to the invited computer. It is valid for 10 minutes.",
                     ),
                 ),
-                (COPY_INVITATION, tr("Копировать код", "Copy code")),
+                (COPY_INVITATION, tr("Копировать ссылку", "Copy link")),
                 (IDOK, tr("Закрыть", "Close")),
             ] {
                 set_text(unsafe { GetDlgItem(dialog, id) }, name);
@@ -1225,7 +1291,7 @@ unsafe extern "system" fn invitation_dialog(
         WM_COMMAND => match i32::from(wparam as u16) {
             COPY_INVITATION => {
                 let code = unsafe { GetDlgItem(dialog, INVITATION_CODE) };
-                let copied = wide(tr("Код скопирован", "Code copied"));
+                let copied = wide(tr("Ссылка скопирована", "Link copied"));
                 unsafe {
                     SendMessageW(code, EM_SETSEL, 0, -1);
                     SendMessageW(code, WM_COPY, 0, 0);

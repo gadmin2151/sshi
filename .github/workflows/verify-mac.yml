@@ -1,0 +1,51 @@
+name: Verify published Mac installer
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Published SSHI version
+        type: string
+        required: true
+        default: '0.2.0'
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/verify-mac.yml
+      - tests/mac_relay_smoke.py
+permissions:
+  contents: read
+
+jobs:
+  installed-package:
+    runs-on: macos-15
+    timeout-minutes: 25
+    env:
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      REQUESTED_VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Download and check the published installer
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${REQUESTED_VERSION:-$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[0].version')}"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          pkg="sshi-$version-macos-arm64.pkg"
+          cd "$RUNNER_TEMP"
+          gh release download --repo "$GITHUB_REPOSITORY" "v$version" -p "$pkg" -p SHA256SUMS
+          expected=$(awk -v file="$pkg" '$2 == file { print $1 }' SHA256SUMS)
+          test "$expected" = "$(shasum -a 256 "$pkg" | cut -d ' ' -f 1)"
+          sudo installer -pkg "$pkg" -target /
+          test "$(/usr/local/bin/sshi --version)" = "sshi $version"
+          /Applications/SSHI.app/Contents/MacOS/SSHI --smoke-test
+      - name: Run the released client and receiver through Iroh
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal
+          cargo +1.96.0 install --locked --debug --version 1.5.0 --features server iroh-relay
+          python3 tests/mac_relay_smoke.py 2>&1 | tee "$RUNNER_TEMP/mac-relay-smoke.log"
+        shell: bash
+      - if: failure()
+        run: |
+          if test -f "$RUNNER_TEMP/mac-relay-smoke.log"; then
+            tail -15 "$RUNNER_TEMP/mac-relay-smoke.log" | while IFS= read -r line; do echo "::error::$line"; done
+          fi

@@ -28,7 +28,7 @@ sshi --version
 man sshi
 ```
 
-На сервере без рабочего стола добавьте к `apt install` параметр `--no-install-recommends`. Пакет для macOS устанавливает также `sshi`, `sshi-copy-id`, `sshi-copy-iid` в `/usr/local/bin`. Пакеты macOS и Windows распространяются без сертификата издателя. Для проверки загрузки сверьте SHA-256 с файлом `SHA256SUMS` этого выпуска.
+На сервере без рабочего стола добавьте к `apt install` параметр `--no-install-recommends`. Пакет для macOS устанавливает также `sshi`, `sshi-copy-id`, `sshi-copy-iid` в `/usr/local/bin`. Пакеты macOS и Windows распространяются без сертификата издателя. Для проверки загрузки сверьте SHA-256 с файлом `SHA256SUMS` этого выпуска. Если macOS запросит подтверждение издателя, следуйте [инструкции Apple по открытию загруженных приложений](https://support.apple.com/en-us/102445).
 
 ## Первый вход
 

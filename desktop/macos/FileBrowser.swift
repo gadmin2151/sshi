@@ -31,6 +31,12 @@ private struct FileCommand: Encodable {
     var source: String? = nil
     var destination: String? = nil
     var names: [String]? = nil
+    var destination_side: FileSide? = nil
+    var move_files: Bool? = nil
+    var name: String? = nil
+    var new_name: String? = nil
+    var text: String? = nil
+    var revision: String? = nil
 }
 
 private struct FileProgress: Decodable {
@@ -44,6 +50,10 @@ private struct FileEvent: Decodable {
     let listing: FileListing?
     let progress: FileProgress?
     let files: UInt64?
+    let entries: Int?
+    let text: String?
+    let revision: String?
+    let warning: String?
     let message: String?
 }
 
@@ -104,6 +114,47 @@ private struct DraggedFiles: Codable {
 
 private let dragType = "com.sshi.pane-selection"
 
+private struct FileClipboard {
+    let side: FileSide
+    let path: String
+    let names: [String]
+    let move: Bool
+}
+
+private struct FileDraft: Identifiable {
+    let id = UUID()
+    let side: FileSide
+    let path: String
+    let name: String
+    let text: String
+    let revision: String
+}
+
+private struct FileNameRequest: Identifiable {
+    let id = UUID()
+    let side: FileSide
+    let path: String
+    let original: String?
+}
+
+private struct DeleteFiles: Identifiable {
+    let id = UUID()
+    let side: FileSide
+    let path: String
+    let names: [String]
+}
+
+private enum FilePrompt: Identifiable {
+    case edit(FileDraft), name(FileNameRequest)
+
+    var id: UUID {
+        switch self {
+        case .edit(let draft): return draft.id
+        case .name(let form): return form.id
+        }
+    }
+}
+
 @MainActor
 private final class FileBrowserModel: ObservableObject {
     @Published var local: FileListing?
@@ -111,6 +162,8 @@ private final class FileBrowserModel: ObservableObject {
     @Published var busy = false
     @Published var status = ""
     @Published var progress: FileProgress?
+    @Published var clipboard: FileClipboard?
+    @Published var prompt: FilePrompt?
     let id = UUID()
     let language: AppLanguage
     private let worker: FileWorker
@@ -134,15 +187,89 @@ private final class FileBrowserModel: ObservableObject {
         }
     }
 
+    func open(_ side: FileSide, entry: FileEntry) async {
+        guard let listing = listing(side) else { return }
+        if entry.kind == "directory" {
+            await browse(side, path: (listing.path as NSString).appendingPathComponent(entry.name))
+        } else if entry.kind == "file" {
+            let command = FileCommand(action: "read_text", side: side, path: listing.path, name: entry.name)
+            if let event = await execute(command, language("Открываем файл…", "Opening file…")),
+               let text = event.text, let revision = event.revision {
+                status = language("Готово", "Ready")
+                prompt = .edit(FileDraft(side: side, path: listing.path, name: entry.name, text: text, revision: revision))
+            }
+        }
+    }
+
+    func save(_ draft: FileDraft, text: String, revision: String) async -> FileEvent? {
+        let command = FileCommand(action: "save_text", side: draft.side, path: draft.path, name: draft.name, text: text, revision: revision)
+        let result = await execute(command, language("Сохраняем…", "Saving…"))
+        if let result { status = result.warning ?? language("Сохранено.", "Saved.") }
+        return result
+    }
+
+    func askName(_ side: FileSide, original: String? = nil) {
+        guard let listing = listing(side) else { return }
+        prompt = .name(FileNameRequest(side: side, path: listing.path, original: original))
+    }
+
+    func name(_ form: FileNameRequest, as name: String) async {
+        let command = form.original.map {
+            FileCommand(action: "rename", side: form.side, path: form.path, name: $0, new_name: name)
+        } ?? FileCommand(action: "new_folder", side: form.side, path: form.path, name: name)
+        await mutate(command, working: language("Обновляем папку…", "Updating folder…"))
+    }
+
+    func delete(_ form: DeleteFiles) async {
+        let command = FileCommand(action: "delete", side: form.side, path: form.path, names: form.names)
+        await mutate(command, working: language("Удаляем…", "Deleting…"))
+    }
+
+    private func mutate(_ command: FileCommand, working: String) async {
+        guard !busy else { return }
+        if await execute(command, working) != nil { status = language("Готово", "Ready") }
+        await refresh([command.side])
+    }
+
+    func remember(_ side: FileSide, names: [String], move: Bool) {
+        guard let source = listing(side), !names.isEmpty else { return }
+        clipboard = FileClipboard(side: side, path: source.path, names: names, move: move)
+        status = move
+            ? language("Вырезано — \(names.count). Выберите папку и нажмите «Вставить».", "Cut — \(names.count). Choose a folder and select Paste.")
+            : language("Скопировано в буфер — \(names.count). Выберите папку и нажмите «Вставить».", "Copied — \(names.count). Choose a folder and select Paste.")
+    }
+
+    func paste(_ side: FileSide) async {
+        guard let clipboard else { return }
+        await transfer(clipboard, to: side)
+    }
+
     func copy(_ side: FileSide, names: [String]) async {
-        guard let source = listing(side), let target = listing(side.opposite), !names.isEmpty else { return }
+        guard let source = listing(side), !names.isEmpty else { return }
         let allowed = Set(source.entries.filter(\.canCopy).map(\.name))
         guard names.allSatisfy(allowed.contains) else { return }
-        let request = FileCommand(action: "copy", side: side, source: source.path, destination: target.path, names: names)
-        if let event = await execute(request, language("Передаём файлы…", "Transferring files…")),
-           let count = event.files {
-            let done = language("Скопировано файлов — \(count)", "Files copied — \(count)")
-            await browse(side.opposite, path: target.path, status: done)
+        await transfer(FileClipboard(side: side, path: source.path, names: names, move: false), to: side.opposite)
+    }
+
+    private func transfer(_ data: FileClipboard, to side: FileSide) async {
+        guard let destination = listing(side), !busy else { return }
+        let request = FileCommand(action: "copy", side: data.side, source: data.path, destination: destination.path,
+                                  names: data.names, destination_side: side, move_files: data.move)
+        let working = data.move ? language("Перемещаем…", "Moving…") : language("Передаём файлы…", "Transferring files…")
+        if let result = await execute(request, working) {
+            if let entries = result.entries {
+                status = language("Перемещено объектов — \(entries)", "Items moved — \(entries)")
+                clipboard = nil
+            } else if let count = result.files {
+                status = language("Скопировано файлов — \(count)", "Files copied — \(count)")
+            }
+        }
+        await refresh(data.move && data.side != side ? [side, data.side] : [side])
+    }
+
+    func refresh(_ sides: [FileSide]) async {
+        for side in sides {
+            if let path = listing(side)?.path { await browse(side, path: path, status: status) }
         }
     }
 
@@ -253,6 +380,114 @@ struct FileBrowser: View {
             if active { Task { await model.browse(.remote, path: model.remote?.path ?? "", reconnect: true) } }
         }
         .onDisappear { login.dispose() }
+        .sheet(item: $model.prompt) { prompt in
+            switch prompt {
+            case .edit(let draft): FileEditorSheet(model: model, draft: draft)
+            case .name(let form): FileNameSheet(model: model, form: form)
+            }
+        }
+    }
+}
+
+@MainActor
+private struct FileNameSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject var model: FileBrowserModel
+    let form: FileNameRequest
+    @State private var name: String
+    @FocusState private var focused: Bool
+
+    init(model: FileBrowserModel, form: FileNameRequest) {
+        self.model = model
+        self.form = form
+        _name = State(initialValue: form.original ?? "")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 11) {
+            Text(form.original == nil ? model.language("Новая папка", "New folder") : model.language("Переименовать", "Rename"))
+                .font(.headline)
+            Text(form.path).font(.callout).foregroundColor(.secondary).lineLimit(1).truncationMode(.middle)
+            TextField(model.language("Имя", "Name"), text: $name).focused($focused)
+            HStack {
+                Spacer()
+                Button(model.language("Отмена", "Cancel")) { dismiss() }.keyboardShortcut(.cancelAction)
+                Button(form.original == nil ? model.language("Создать", "Create") : model.language("Переименовать", "Rename")) {
+                    let result = name
+                    dismiss()
+                    Task { await model.name(form, as: result) }
+                }.keyboardShortcut(.defaultAction)
+                    .disabled(name.isEmpty || name == "." || name == ".." || name == form.original || name.contains("/"))
+            }
+        }.padding(20).frame(width: 420).onAppear { focused = true }
+    }
+}
+
+@MainActor
+private struct FileEditorSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject var model: FileBrowserModel
+    let draft: FileDraft
+    @State private var text: String
+    @State private var savedText: String
+    @State private var revision: String
+    @State private var saved = false
+    @State private var feedback = ""
+    @State private var discard = false
+    @FocusState private var focused: Bool
+
+    init(model: FileBrowserModel, draft: FileDraft) {
+        self.model = model
+        self.draft = draft
+        _text = State(initialValue: draft.text)
+        _savedText = State(initialValue: draft.text)
+        _revision = State(initialValue: draft.revision)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Text(draft.name).font(.headline).textSelection(.enabled)
+            Text((draft.path as NSString).appendingPathComponent(draft.name))
+                .font(.callout).foregroundColor(.secondary).textSelection(.enabled)
+            TextEditor(text: $text).font(.system(.body, design: .monospaced)).focused($focused)
+                .accessibilityLabel(model.language("Текст файла", "File text"))
+                .disabled(model.busy)
+                .border(Color.secondary.opacity(0.22))
+            HStack {
+                Text(feedback).font(.callout).foregroundColor(.secondary).textSelection(.enabled)
+                Spacer()
+                Button(model.language("Закрыть", "Close")) {
+                    if text == savedText { finish() } else { discard = true }
+                }.keyboardShortcut(.cancelAction)
+                Button(model.language("Сохранить", "Save")) { Task { await save() } }
+                    .buttonStyle(.borderedProminent).keyboardShortcut("s", modifiers: .command)
+                    .disabled(text == savedText)
+            }.disabled(model.busy)
+        }
+        .padding(16).frame(minWidth: 660, minHeight: 480)
+        .onAppear { focused = true }
+        .interactiveDismissDisabled(model.busy || text != savedText)
+        .alert(isPresented: $discard) {
+            Alert(title: Text(model.language("Закрыть без сохранения?", "Close without saving?")),
+                  primaryButton: .destructive(Text(model.language("Закрыть", "Close")), action: finish),
+                  secondaryButton: .cancel(Text(model.language("Отмена", "Cancel"))))
+        }
+    }
+
+    private func save() async {
+        let value = text
+        feedback = model.language("Сохраняем…", "Saving…")
+        if let result = await model.save(draft, text: value, revision: revision), let nextRevision = result.revision {
+            revision = nextRevision
+            savedText = value
+            saved = true
+        }
+        feedback = model.status
+    }
+
+    private func finish() {
+        dismiss()
+        if saved { Task { await model.refresh([draft.side]) } }
     }
 }
 
@@ -264,13 +499,19 @@ private struct BrowserPane: View {
     @Binding var selection: Set<String>
     @State private var address = ""
     @State private var target = false
+    @State private var deletion: DeleteFiles?
 
     var listing: FileListing? { model.listing(side) }
 
     var body: some View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 6) {
-                Text(title).font(.headline).lineLimit(1)
+                HStack {
+                    Text(title).font(.headline).lineLimit(1)
+                    Spacer()
+                    Menu(model.language("Действия", "Actions")) { commands(selection.sorted()) }
+                        .fixedSize().disabled(listing == nil)
+                }
                 HStack(spacing: 6) {
                     Button {
                         if let path = listing?.parent { Task { await model.browse(side, path: path) } }
@@ -299,11 +540,9 @@ private struct BrowserPane: View {
                         }
                     }.contentShape(Rectangle()).tag(entry.name)
                     .simultaneousGesture(TapGesture(count: 2).onEnded {
-                        if entry.kind == "directory", let directory = listing?.path {
-                            let path = directory.hasSuffix("/") ? directory + entry.name : directory + "/" + entry.name
-                            Task { await model.browse(side, path: path) }
-                        }
+                        Task { await model.open(side, entry: entry) }
                     })
+                    .contextMenu { commands(selection.contains(entry.name) ? selection.sorted() : [entry.name]) }
                     .onDrag { drag(entry) }
                 }
             }.listStyle(.plain)
@@ -314,6 +553,38 @@ private struct BrowserPane: View {
         .frame(minWidth: 280, maxWidth: .infinity, maxHeight: .infinity)
         .onChange(of: listing?.path) { path in address = path ?? ""; selection.removeAll() }
         .onChange(of: listing?.entries.map(\.name)) { names in selection.formIntersection(names ?? []) }
+        .alert(item: $deletion) { form in
+            let names = form.names.prefix(5).joined(separator: "\n")
+            let extra = form.names.count > 5 ? "\n… +\(form.names.count - 5)" : ""
+            return Alert(title: Text(model.language("Удалить без корзины?", "Delete permanently?")),
+                         message: Text("\(title) · \(form.path)\n\n\(names)\(extra)"),
+                         primaryButton: .destructive(Text(model.language("Удалить", "Delete"))) {
+                             Task { await model.delete(form) }
+                         }, secondaryButton: .cancel(Text(model.language("Отмена", "Cancel"))))
+        }
+    }
+
+    @ViewBuilder
+    private func commands(_ names: [String]) -> some View {
+        let chosen = Set(names)
+        let entries = listing?.entries.filter { chosen.contains($0.name) } ?? []
+        let item = entries.count == 1 ? entries.first : nil
+        let copyable = !entries.isEmpty && entries.allSatisfy(\.canCopy)
+        Button(item?.kind == "directory" ? model.language("Открыть папку", "Open folder") : model.language("Открыть в редакторе", "Open in editor")) {
+            if let item { Task { await model.open(side, entry: item) } }
+        }.disabled(item?.canCopy != true)
+        Divider()
+        Button(model.language("Копировать", "Copy")) { model.remember(side, names: names, move: false) }.disabled(!copyable)
+        Button(model.language("Вырезать", "Cut")) { model.remember(side, names: names, move: true) }.disabled(!copyable)
+        Button(model.language("Вставить", "Paste")) { Task { await model.paste(side) } }.disabled(model.clipboard == nil || listing == nil)
+        Divider()
+        Button(model.language("Переименовать…", "Rename…")) {
+            if let item { model.askName(side, original: item.name) }
+        }.disabled(item == nil)
+        Button(model.language("Новая папка…", "New folder…")) { model.askName(side) }.disabled(listing == nil)
+        Button(model.language("Удалить…", "Delete…"), role: .destructive) {
+            if let listing { deletion = DeleteFiles(side: side, path: listing.path, names: names) }
+        }.disabled(entries.isEmpty)
     }
 
     private func drag(_ entry: FileEntry) -> NSItemProvider {

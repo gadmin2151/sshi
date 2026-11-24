@@ -6,6 +6,7 @@ import json
 import locale
 import os
 from pathlib import Path
+import posixpath
 import re
 import select
 import shutil
@@ -29,7 +30,7 @@ if not os.path.isfile(SSHI):
     SSHI = shutil.which("sshi") or "sshi"
 
 LANGUAGE_FILE = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "sshi/desktop-language"
-RELEASE_URL = "https://github.com/gadmin2151/sshi/releases/tag/v0.3.1"
+RELEASE_URL = "https://github.com/gadmin2151/sshi/releases/tag/v0.4.0"
 
 
 def read_language():
@@ -542,14 +543,18 @@ class ControlSocketPanel(Gtk.Box):
 
 class FilePane:
     def __init__(self, window, side, title):
-        self.side = side
+        self.side, self.title = side, title
         self.path = None
         self.parent = None
         self.entries = {}
         self.widget = styled(box(True, 0), "file-pane")
         bar = styled(box(True, 7), "file-pane-bar")
         self.widget.pack_start(bar, False, False, 0)
-        bar.add(label(title, "sshi-section", "file-pane-title"))
+        heading = box(False, 6)
+        heading.pack_start(label(title, "sshi-section", "file-pane-title"), True, True, 0)
+        self.commands_button = action(tr("Действия ▾", "Actions ▾"), lambda: window.menu(self))
+        heading.pack_end(self.commands_button, False, False, 0)
+        bar.pack_start(heading, False, False, 0)
         row = box(False, 5)
         self.path_field = Gtk.Entry()
         self.path_field.set_placeholder_text(tr("Путь к папке", "Folder path"))
@@ -580,7 +585,10 @@ class FilePane:
         self.tree.append_column(name)
         size = Gtk.CellRendererText(xalign=1)
         self.tree.append_column(Gtk.TreeViewColumn(tr("Размер", "Size"), size, text=2))
-        self.tree.connect("row-activated", lambda _tree, path, _column: self.open(window, path))
+        self.tree.connect("row-activated", lambda _tree, path, _column: window.open_entry(side, self.rows[path][3]))
+        self.tree.connect("button-press-event", lambda _tree, event: window.context_menu(self, event))
+        self.tree.connect("key-press-event", lambda _tree, event: window.file_key(self, event))
+        self.tree.connect("popup-menu", lambda _tree: window.menu(self))
         scroll = Gtk.ScrolledWindow()
         scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         scroll.add(self.tree)
@@ -606,17 +614,125 @@ class FilePane:
     def visible(value):
         return "".join(c if c.isprintable() else "\ufffd" for c in value)
 
-    def selected(self):
+    def selected(self, copyable=False):
         model, paths = self.tree.get_selection().get_selected_rows()
-        return [model[path][3] for path in paths if model[path][4] in ("file", "directory")]
-
-    def open(self, window, index):
-        row = self.rows[index]
-        if row[4] == "directory" and self.path:
-            window.browse(self.side, os.path.join(self.path, row[3]))
+        return [model[path][3] for path in paths if not copyable or model[path][4] in ("file", "directory")]
 
     def drag_data(self, _tree, _context, selection, _info, _time):
-        selection.set(selection.get_target(), 8, json.dumps(self.selected(), ensure_ascii=False).encode("utf-8"))
+        selection.set(selection.get_target(), 8, json.dumps(self.selected(copyable=True), ensure_ascii=False).encode("utf-8"))
+
+
+class FileEditor(Gtk.Dialog):
+    def __init__(self, parent, side, path, name, document):
+        super().__init__(title=FilePane.visible(name), transient_for=parent, modal=True, destroy_with_parent=True)
+        self.browser = parent
+        self.side, self.path, self.name = side, path, name
+        self.original = document["text"]
+        self.revision = document["revision"]
+        self.saving = False
+        self.saved = False
+        self.set_default_size(740, 510)
+        self.add_button(tr("Закрыть", "Close"), Gtk.ResponseType.CLOSE)
+        self.save_button = styled(self.add_button(tr("Сохранить", "Save"), Gtk.ResponseType.APPLY), "suggested-action")
+        content = box(True, 9)
+        content.set_border_width(12)
+        self.get_content_area().pack_start(content, True, True, 0)
+        place = parent.panes[side].title
+        filename = label(f"{place} · {FilePane.visible(posixpath.join(path, name))}", "dim-label", wrap=True)
+        filename.set_selectable(True)
+        content.pack_start(filename, False, False, 0)
+        self.text = Gtk.TextView(monospace=True, left_margin=9, right_margin=9, top_margin=7, bottom_margin=7)
+        self.text.get_accessible().set_name(tr("Текст файла", "File text"))
+        self.buffer = self.text.get_buffer()
+        self.buffer.set_text(self.original)
+        self.buffer.place_cursor(self.buffer.get_start_iter())
+        self.buffer.connect("changed", lambda *_: self.controls())
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_shadow_type(Gtk.ShadowType.IN)
+        scroll.add(self.text)
+        content.pack_start(scroll, True, True, 0)
+        self.status = label("", wrap=True)
+        self.status.set_selectable(True)
+        content.pack_start(self.status, False, False, 0)
+        self.connect("response", self.respond)
+        self.connect("key-press-event", self.key)
+        self.connect("delete-event", self.close_event)
+        self.controls()
+        self.show_all()
+        self.text.grab_focus()
+
+    def value(self):
+        start, end = self.buffer.get_bounds()
+        return self.buffer.get_text(start, end, True)
+
+    def controls(self):
+        self.save_button.set_sensitive(not self.saving and self.value() != self.original)
+        self.text.set_editable(not self.saving)
+        self.set_response_sensitive(Gtk.ResponseType.CLOSE, not self.saving)
+
+    def key(self, _widget, event):
+        if event.state & Gdk.ModifierType.CONTROL_MASK and Gdk.keyval_to_lower(event.keyval) == Gdk.KEY_s:
+            self.save()
+            return True
+        return False
+
+    def close_event(self, *_):
+        self.close_editor()
+        return True
+
+    def respond(self, _dialog, response):
+        if response == Gtk.ResponseType.APPLY:
+            self.save()
+        else:
+            self.close_editor()
+
+    def close_editor(self):
+        if self.saving:
+            return
+        if self.value() != self.original and not file_confirm(
+            self, tr("Закрыть без сохранения?", "Close without saving?"), FilePane.visible(self.name), tr("Закрыть", "Close")
+        ):
+            return
+        self.destroy()
+        if self.saved and not self.browser.closing:
+            self.browser.refresh_panes([self.side])
+
+    def save(self):
+        if self.saving:
+            return
+        value = self.value()
+        if value == self.original:
+            return
+        self.saving = True
+        self.status.set_text(tr("Сохраняем…", "Saving…"))
+        self.controls()
+
+        def done(event, error):
+            self.saving = False
+            if error:
+                self.status.set_text(error)
+            else:
+                self.original, self.revision = value, event["revision"]
+                self.saved = True
+                self.status.set_text(event.get("warning") or tr("Сохранено.", "Saved."))
+                self.browser.status.set_text(self.status.get_text())
+            self.controls()
+
+        if not self.browser.request({"action": "save_text", "side": self.side, "path": self.path, "name": self.name,
+                                    "text": value, "revision": self.revision}, self.status.get_text(), done=done):
+            done(None, tr("Дождитесь завершения текущей операции.", "Wait for the current operation to finish."))
+
+
+def file_confirm(parent, title, detail, verb):
+    prompt = Gtk.MessageDialog(transient_for=parent, modal=True, buttons=Gtk.ButtonsType.NONE,
+                               message_type=Gtk.MessageType.QUESTION, text=title)
+    prompt.format_secondary_text(detail)
+    prompt.add_button(tr("Отмена", "Cancel"), Gtk.ResponseType.CANCEL)
+    styled(prompt.add_button(verb, Gtk.ResponseType.OK), "destructive-action")
+    prompt.set_default_response(Gtk.ResponseType.CANCEL)
+    confirmed = prompt.run() == Gtk.ResponseType.OK
+    prompt.destroy()
+    return confirmed
 
 
 class FileWindow(Gtk.Window):
@@ -628,6 +744,7 @@ class FileWindow(Gtk.Window):
         self.owner = owner
         self.worker = None
         self.busy = False
+        self.file_clipboard = None
         self.closing = False
         self.widgets_ready = False
         header = Gtk.HeaderBar(title=tr("Файлы", "Files"), subtitle=profile["name"], show_close_button=True)
@@ -676,12 +793,13 @@ class FileWindow(Gtk.Window):
         if not self.widgets_ready:
             return
         local, remote = self.panes["local"], self.panes["remote"]
-        self.upload.set_sensitive(not self.busy and remote.path is not None and bool(local.selected()))
-        self.download.set_sensitive(not self.busy and local.path is not None and bool(remote.selected()))
+        self.upload.set_sensitive(not self.busy and remote.path is not None and bool(local.selected(copyable=True)))
+        self.download.set_sensitive(not self.busy and local.path is not None and bool(remote.selected(copyable=True)))
         self.sign_in_button.set_sensitive(not self.busy)
         for pane in self.panes.values():
             pane.widget.set_sensitive(not self.busy)
             pane.up.set_sensitive(not self.busy and pane.parent is not None)
+            pane.commands_button.set_sensitive(not self.busy and pane.path is not None)
 
     def sign_in(self):
         if self.socket_login is None:
@@ -700,7 +818,7 @@ class FileWindow(Gtk.Window):
         if not self.closing:
             self.browse("remote", self.panes["remote"].path or "", reconnect=True)
 
-    def request(self, request, working, on_done=None, finished_message=None):
+    def request(self, request, working, finished_message=None, done=None):
         if self.busy or self.closing:
             return False
         self.busy = True
@@ -740,39 +858,216 @@ class FileWindow(Gtk.Window):
                 self.panes[event["listing"]["side"]].replace(event["listing"])
                 self.status.set_text(finished_message or tr("Готово", "Ready"))
             elif event["type"] == "copied":
-                self.status.set_text(tr("Скопировано файлов: {}", "Files copied: {}").format(event["files"]))
+                self.status.set_text(tr("Скопировано файлов — {}", "Files copied — {}").format(event["files"]))
+            elif event["type"] == "changed":
+                self.status.set_text(tr("Готово", "Ready"))
             self.controls()
-            if on_done and (not error or request["side"] == "local" and request["action"] == "list"):
-                on_done()
+            if done:
+                done(event, error)
 
         background(work, result)
         return True
 
     def browse(self, side, path, reconnect=False, on_done=None, finished_message=None):
         if path is None:
+            if on_done:
+                on_done()
             return
         title = tr("Подключаемся к удалённой машине…", "Connecting to the remote computer…") if (
             side == "remote" and (self.panes[side].path is None or reconnect)
         ) else tr("Открываем папку…", "Opening folder…")
+
+        def done(_event, error):
+            if error and finished_message:
+                self.status.set_text(f"{finished_message}\n{error}")
+            if on_done:
+                on_done()
+
         self.request({"action": "list", "side": side, "path": path, "reconnect": reconnect},
-                     title, on_done=on_done, finished_message=finished_message)
+                     title, finished_message=finished_message, done=done)
+
+    def refresh_panes(self, sides):
+        if self.closing or not sides:
+            return
+        side, *rest = sides
+        self.browse(side, self.panes[side].path, on_done=lambda: self.refresh_panes(rest),
+                    finished_message=self.status.get_text())
 
     def copy(self, side, names=None):
         other = "remote" if side == "local" else "local"
-        source, dest = self.panes[side], self.panes[other]
-        names = names if names is not None else source.selected()
-        if not source.path or not dest.path or not names or not all(
-            name in source.entries and source.entries[name]["kind"] in ("file", "directory") for name in names
-        ):
+        source = self.panes[side]
+        names = names if names is not None else source.selected(copyable=True)
+        return self.transfer(side, source.path, names, other)
+
+    def transfer(self, side, source, names, target, move=False):
+        destination = self.panes[target].path
+        if not source or not destination or not names:
             return False
-        return self.request({"action": "copy", "side": side, "source": source.path,
-                             "destination": dest.path, "names": names},
-                            tr("Передаём файлы…", "Transferring files…"),
-                            on_done=lambda: self.browse(other, dest.path, finished_message=self.status.get_text()))
+
+        def done(_event, error):
+            if move and not error:
+                self.file_clipboard = None
+                self.status.set_text(tr("Перемещено объектов — {}", "Items moved — {}").format(len(names)))
+            self.refresh_panes([target, side] if move and side != target else [target])
+
+        return self.request({"action": "copy", "side": side, "source": source, "destination": destination,
+                             "names": names, "destination_side": target, "move_files": move},
+                            tr("Перемещаем…", "Moving…") if move else tr("Передаём файлы…", "Transferring files…"), done=done)
+
+    def open_entry(self, side, name):
+        pane = self.panes[side]
+        entry = pane.entries.get(name)
+        if not entry or self.busy or pane.path is None:
+            return
+        path = pane.path
+        if entry["kind"] == "directory":
+            self.browse(side, posixpath.join(path, name))
+        elif entry["kind"] == "file":
+            def done(event, error):
+                if not error:
+                    self.status.set_text(tr("Готово", "Ready"))
+                    FileEditor(self, side, path, name, event)
+            self.request({"action": "read_text", "side": side, "path": path, "name": name},
+                         tr("Открываем файл…", "Opening file…"), done=done)
+
+    def remember(self, pane, move):
+        names = pane.selected(copyable=True)
+        if names:
+            self.file_clipboard = (pane.side, pane.path, names, move)
+            self.status.set_text(tr("Вырезано — {}. Выберите папку и нажмите «Вставить».",
+                                    "Cut — {}. Choose a folder and select Paste.").format(len(names)) if move else
+                                 tr("Скопировано в буфер — {}. Выберите папку и нажмите «Вставить».",
+                                    "Copied — {}. Choose a folder and select Paste.").format(len(names)))
+
+    def paste(self, pane):
+        if self.file_clipboard:
+            side, source, names, move = self.file_clipboard
+            self.transfer(side, source, names, pane.side, move)
+
+    def name_entry(self, pane, rename):
+        names = pane.selected()
+        if rename and len(names) != 1:
+            return
+        original = names[0] if rename else ""
+        title = tr("Переименовать", "Rename") if rename else tr("Новая папка", "New folder")
+        dialog = Gtk.Dialog(title=title, transient_for=self, modal=True, destroy_with_parent=True)
+        dialog.add_button(tr("Отмена", "Cancel"), Gtk.ResponseType.CANCEL)
+        accept = styled(dialog.add_button(title if rename else tr("Создать", "Create"), Gtk.ResponseType.OK), "suggested-action")
+        dialog.set_default_response(Gtk.ResponseType.OK)
+        form = box(True, 7)
+        form.set_border_width(14)
+        dialog.get_content_area().add(form)
+        form.add(label(pane.path, "dim-label", wrap=True))
+        field = Gtk.Entry(text=original, activates_default=True)
+        field.get_accessible().set_name(tr("Имя", "Name"))
+        field.set_width_chars(34)
+        form.add(field)
+
+        def validate(*_):
+            name = field.get_text()
+            accept.set_sensitive(bool(name) and name not in (".", "..", original) and "/" not in name)
+
+        field.connect("changed", validate)
+        dialog.show_all()
+        field.grab_focus()
+        field.select_region(0, -1)
+        validate()
+        response = dialog.run()
+        name = field.get_text()
+        dialog.destroy()
+        if response != Gtk.ResponseType.OK:
+            return
+        data = {"action": "rename" if rename else "new_folder", "side": pane.side, "path": pane.path, "name": name}
+        if rename:
+            data.update(name=original, new_name=name)
+        self.request(data, title, done=lambda *_: self.refresh_panes([pane.side]))
+
+    def delete_entries(self, pane):
+        names = pane.selected()
+        if not names:
+            return
+        display = "\n".join(FilePane.visible(name) for name in names[:5])
+        if len(names) > 5:
+            display += f"\n… +{len(names) - 5}"
+        if file_confirm(self, tr("Удалить без корзины?", "Delete permanently?"),
+                        f"{pane.title} · {pane.path}\n\n{display}", tr("Удалить", "Delete")):
+            self.request({"action": "delete", "side": pane.side, "path": pane.path, "names": names},
+                         tr("Удаляем…", "Deleting…"), done=lambda *_: self.refresh_panes([pane.side]))
+
+    def menu(self, pane, event=None):
+        if self.busy or pane.path is None:
+            return False
+        names = pane.selected()
+        one = names[0] if len(names) == 1 else None
+        kind = pane.entries[one]["kind"] if one else None
+        copyable = bool(names) and names == pane.selected(copyable=True)
+        items = [
+            (tr("Открыть папку", "Open folder") if kind == "directory" else tr("Открыть в редакторе", "Open in editor"),
+             kind in ("file", "directory"), lambda: self.open_entry(pane.side, one)),
+            None,
+            (tr("Копировать", "Copy"), copyable, lambda: self.remember(pane, False)),
+            (tr("Вырезать", "Cut"), copyable, lambda: self.remember(pane, True)),
+            (tr("Вставить", "Paste"), self.file_clipboard is not None, lambda: self.paste(pane)),
+            None,
+            (tr("Переименовать…", "Rename…"), one is not None, lambda: self.name_entry(pane, True)),
+            (tr("Новая папка…", "New folder…"), True, lambda: self.name_entry(pane, False)),
+            (tr("Удалить…", "Delete…"), bool(names), lambda: self.delete_entries(pane)),
+        ]
+        menu = Gtk.Menu()
+        menu.attach_to_widget(pane.widget, None)
+        for spec in items:
+            if spec is None:
+                menu.append(Gtk.SeparatorMenuItem())
+            else:
+                caption, enabled, run = spec
+                item = Gtk.MenuItem(label=caption, sensitive=enabled)
+                item.connect("activate", lambda _item, run=run: run())
+                menu.append(item)
+        menu.connect("selection-done", lambda *_: menu.destroy())
+        menu.show_all()
+        if event:
+            menu.popup_at_pointer(event)
+        else:
+            menu.popup_at_widget(pane.commands_button, Gdk.Gravity.SOUTH_EAST, Gdk.Gravity.NORTH_EAST, None)
+        return True
+
+    def context_menu(self, pane, event):
+        if event.button != Gdk.BUTTON_SECONDARY or self.busy:
+            return False
+        pane.tree.grab_focus()
+        hit = pane.tree.get_path_at_pos(int(event.x), int(event.y))
+        selection = pane.tree.get_selection()
+        if hit and not selection.path_is_selected(hit[0]):
+            selection.unselect_all()
+            selection.select_path(hit[0])
+        elif not hit:
+            selection.unselect_all()
+        return self.menu(pane, event)
+
+    def file_key(self, pane, event):
+        if self.busy or pane.path is None:
+            return False
+        if event.state & Gdk.ModifierType.CONTROL_MASK:
+            key = Gdk.keyval_to_lower(event.keyval)
+            if key in (Gdk.KEY_c, Gdk.KEY_x):
+                if pane.selected() == pane.selected(copyable=True):
+                    self.remember(pane, key == Gdk.KEY_x)
+                return True
+            if key == Gdk.KEY_v:
+                self.paste(pane)
+                return True
+        if event.keyval == Gdk.KEY_F2:
+            self.name_entry(pane, True)
+            return True
+        if event.keyval == Gdk.KEY_Delete:
+            self.delete_entries(pane)
+            return True
+        return False
 
     def progress(self, progress):
         if self.closing or not self.busy:
             return
+        self.progress_bar.show()
         bytes_done, total = progress["bytes"], progress["total"]
         if total:
             self.progress_bar.set_fraction(min(bytes_done / total, 1))
@@ -1702,7 +1997,7 @@ class Window(Gtk.Window):
         relay = action(tr("Настройки relay…", "Relay settings…"), lambda: self.safe(lambda: self.relay_settings(dialog)),
                        "network-server-symbolic")
         grid.attach(relay, 0, 1, 2, 1)
-        release = Gtk.LinkButton.new_with_label(RELEASE_URL, tr("Что нового в 0.3.1", "What’s new in 0.3.1"))
+        release = Gtk.LinkButton.new_with_label(RELEASE_URL, tr("Что нового в 0.4.0", "What’s new in 0.4.0"))
         release.set_halign(Gtk.Align.START)
         grid.attach(release, 0, 2, 2, 1)
         check = action(tr("Проверить обновления", "Check for updates"), self.check_updates)

@@ -1,15 +1,15 @@
-# SSHI 0.3.1
+# SSHI 0.4.0
 
-## SSH-сокет в карточке подключения
+## Файлы и редактор
 
-- В Linux и macOS статус сокета виден в основном окне выбранного профиля. Нажмите **«Включить»**, затем **«Скопировать команду»**. При входе по ключу сокет запускается в фоне.
-- Если SSH требует пароль или подтверждение отпечатка, приложение покажет кнопку **«Войти в терминале»**. Ошибки и подтверждение остановки выводятся в той же карточке.
-- CLI поддерживает `sshi socket start --batch PROFILE` для запуска в режиме OpenSSH BatchMode.
+- Двойной щелчок по текстовому файлу открывает встроенный редактор в Linux, macOS и Windows. Изменения сохраняются обратно в выбранный файл.
+- В меню **«Действия»** каждой панели доступны копирование, вырезание, вставка, переименование, создание папок и удаление с подтверждением. Буфер позволяет переносить файлы и папки между компьютерами и внутри каждой стороны.
+- Редактор поддерживает UTF-8 до 2 МиБ и проверяет, изменился ли файл после открытия. Передача файлов сохраняет существующие файлы при совпадении имён.
 
-## English
+## Files and editor
 
-- On Linux and macOS, turn on the SSH control socket directly in the selected connection’s card. The app shows its status and offers **Copy command** when it is ready.
-- Configured keys can start the socket in the background. If SSH needs interactive sign-in, the card offers a terminal and displays startup errors inline.
-- Use `sshi socket start --batch PROFILE` to start without interactive prompts in the CLI.
+- Double-click a text file to open the built-in editor on Linux, macOS, or Windows. Save changes directly to the selected file.
+- Use **Actions** or right-click in either pane to copy, cut, paste, rename, create a folder, or confirm deletion. The file clipboard works across both panes and within each side.
+- The editor supports UTF-8 files up to 2 MiB and checks for edits made after the file was opened. Conflicting transfers preserve existing files.
 
-[Руководство / Setup guide](https://github.com/gadmin2151/sshi/blob/v0.3.1/README.md) · [Передача файлов в 0.3.0 / File transfer in 0.3.0](https://github.com/gadmin2151/sshi/releases/tag/v0.3.0)
+[Руководство / Setup guide](https://github.com/gadmin2151/sshi/blob/v0.4.0/README.md)

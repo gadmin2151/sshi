@@ -1,4 +1,6 @@
-use std::{cell::RefCell, mem::size_of, ptr::null_mut, sync::mpsc, thread};
+mod editor;
+
+use std::{cell::RefCell, collections::VecDeque, mem::size_of, ptr::null_mut, sync::mpsc, thread};
 
 use crate::{
     lang::{tr, tr_format},
@@ -8,7 +10,7 @@ use crate::{
 };
 use anyhow::{Result, ensure};
 use iroh_ssh::{
-    file_transfer::{self, Entry, Event, Kind, Listing, Request, Side},
+    file_transfer::{self, Event, Kind, Listing, Request, Side},
     run_async,
 };
 use tokio::sync::mpsc as async_mpsc;
@@ -18,15 +20,18 @@ use windows_sys::Win32::{
     System::LibraryLoader::GetModuleHandleW,
     UI::{
         Controls::{
-            EM_LIMITTEXT, EM_SETPASSWORDCHAR, ICC_LISTVIEW_CLASSES, ICC_PROGRESS_CLASS,
+            EM_LIMITTEXT, EM_SETPASSWORDCHAR, EM_SETSEL, ICC_LISTVIEW_CLASSES, ICC_PROGRESS_CLASS,
             INITCOMMONCONTROLSEX, InitCommonControlsEx, LVCF_TEXT, LVCF_WIDTH, LVCOLUMNW,
-            LVIF_TEXT, LVITEMW, LVM_DELETEALLITEMS, LVM_GETNEXTITEM, LVM_INSERTCOLUMNW,
-            LVM_INSERTITEMW, LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMTEXTW,
-            LVN_BEGINDRAG, LVN_ITEMCHANGED, LVNI_SELECTED, LVS_EX_DOUBLEBUFFER,
-            LVS_EX_FULLROWSELECT, NM_DBLCLK, NM_RETURN, NMHDR, NMLISTVIEW, PBM_SETPOS,
-            PBM_SETRANGE32,
+            LVIF_TEXT, LVIS_SELECTED, LVITEMW, LVM_DELETEALLITEMS, LVM_GETITEMSTATE,
+            LVM_GETNEXTITEM, LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETCOLUMNWIDTH,
+            LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMSTATE, LVM_SETITEMTEXTW, LVN_BEGINDRAG,
+            LVN_ITEMCHANGED, LVN_KEYDOWN, LVNI_SELECTED, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT,
+            NM_DBLCLK, NM_RCLICK, NM_RETURN, NMHDR, NMITEMACTIVATE, NMLISTVIEW, NMLVKEYDOWN,
+            PBM_SETPOS, PBM_SETRANGE32,
         },
-        Input::KeyboardAndMouse::{EnableWindow, ReleaseCapture, SetCapture},
+        Input::KeyboardAndMouse::{
+            EnableWindow, GetKeyState, ReleaseCapture, SetCapture, VK_CONTROL, VK_DELETE, VK_F2,
+        },
         WindowsAndMessaging::*,
     },
 };
@@ -44,8 +49,73 @@ const ADDRESS: i32 = 2;
 const ROWS: i32 = 3;
 const GO: i32 = 4;
 const REFRESH: i32 = 5;
+const ACTIONS: i32 = 6;
 const PROMPT: i32 = 3301;
 const ANSWER: i32 = 3302;
+
+const OPEN_FILE: usize = 1;
+const COPY_FILE: usize = 2;
+const CUT_FILE: usize = 3;
+const PASTE_FILE: usize = 4;
+const RENAME_FILE: usize = 5;
+const DELETE_FILE: usize = 6;
+const NEW_FOLDER: usize = 7;
+
+struct FileAddress {
+    side: Side,
+    path: String,
+    name: String,
+}
+
+impl FileAddress {
+    fn display(&self) -> String {
+        if self.side == Side::Local {
+            std::path::Path::new(&self.path)
+                .join(&self.name)
+                .to_string_lossy()
+                .into_owned()
+        } else {
+            format!("{}/{}", self.path.trim_end_matches('/'), self.name)
+        }
+    }
+}
+
+#[derive(Clone)]
+struct FileClipboard {
+    side: Side,
+    path: String,
+    names: Vec<String>,
+    moving: bool,
+}
+
+enum Pending {
+    Open(FileAddress),
+    Change { sides: VecDeque<Side>, moving: bool },
+}
+
+struct Popup(HMENU);
+
+impl Popup {
+    fn new() -> Option<Self> {
+        let menu = unsafe { CreatePopupMenu() };
+        (!menu.is_null()).then_some(Self(menu))
+    }
+
+    fn add(&self, command: usize, caption: &str, enabled: bool) {
+        let flags = MF_STRING | if enabled { MF_ENABLED } else { MF_GRAYED };
+        unsafe { AppendMenuW(self.0, flags, command, wide(caption).as_ptr()) };
+    }
+
+    fn separator(&self) {
+        unsafe { AppendMenuW(self.0, MF_SEPARATOR, 0, std::ptr::null()) };
+    }
+}
+
+impl Drop for Popup {
+    fn drop(&mut self) {
+        unsafe { DestroyMenu(self.0) };
+    }
+}
 
 struct View {
     name: String,
@@ -55,7 +125,9 @@ struct View {
     local: Option<Listing>,
     remote: Option<Listing>,
     busy: bool,
-    copying: Option<Side>,
+    pending: Option<Pending>,
+    refresh: VecDeque<Side>,
+    clipboard: Option<FileClipboard>,
     finished: Option<String>,
     drag: Option<(Side, Vec<String>)>,
     heading: HFONT,
@@ -101,7 +173,9 @@ pub fn show(store: Store, profile: Profile) -> Result<()> {
         local: None,
         remote: None,
         busy: false,
-        copying: None,
+        pending: None,
+        refresh: VecDeque::new(),
+        clipboard: None,
         finished: None,
         drag: None,
         heading: null_mut(),
@@ -158,14 +232,6 @@ async fn work(
 
 fn number(side: Side) -> i32 {
     if side == Side::Local { LOCAL } else { REMOTE }
-}
-
-fn other(side: Side) -> Side {
-    if side == Side::Local {
-        Side::Remote
-    } else {
-        Side::Local
-    }
 }
 
 fn item(dialog: HWND, id: i32) -> HWND {
@@ -226,6 +292,7 @@ impl View {
             set_caption(hwnd, side + PARENT, tr("Вверх", "Up"));
             set_caption(hwnd, side + GO, tr("Перейти", "Go"));
             set_caption(hwnd, side + REFRESH, tr("Обнов.", "Refresh"));
+            set_caption(hwnd, side + ACTIONS, tr("Действия ▾", "Actions ▾"));
             let view = item(hwnd, side + ROWS);
             call(
                 view,
@@ -302,11 +369,12 @@ impl View {
         place(DOWNLOAD, width - 102, 9, 92, 19);
         for (base, x) in [(LOCAL, 10), (REMOTE, 19 + pane_width)] {
             place(base, x, 39, pane_width, height - 86);
-            place(base + PARENT, x + 8, 55, 37, 16);
-            place(base + ADDRESS, x + 49, 55, pane_width - 131, 16);
-            place(base + GO, x + pane_width - 78, 55, 34, 16);
-            place(base + REFRESH, x + pane_width - 40, 55, 32, 16);
-            let list = place(base + ROWS, x + 8, 76, pane_width - 16, height - 133);
+            place(base + ACTIONS, x + pane_width - 69, 42, 61, 16);
+            place(base + PARENT, x + 8, 63, 37, 16);
+            place(base + ADDRESS, x + 49, 63, pane_width - 131, 16);
+            place(base + GO, x + pane_width - 78, 63, 34, 16);
+            place(base + REFRESH, x + pane_width - 40, 63, 32, 16);
+            let list = place(base + ROWS, x + 8, 84, pane_width - 16, height - 141);
             call(
                 item(hwnd, base + ROWS),
                 LVM_SETCOLUMNWIDTH,
@@ -332,6 +400,12 @@ impl View {
             for id in [ADDRESS, ROWS, GO, REFRESH] {
                 unsafe { EnableWindow(item(hwnd, base + id), (!self.busy) as i32) };
             }
+            unsafe {
+                EnableWindow(
+                    item(hwnd, base + ACTIONS),
+                    (!self.busy && self.listing(side).is_some()) as i32,
+                )
+            };
             let parent = self.listing(side).is_some_and(|view| view.parent.is_some());
             unsafe { EnableWindow(item(hwnd, base + PARENT), (!self.busy && parent) as i32) };
             let command = if side == Side::Local {
@@ -340,8 +414,8 @@ impl View {
                 DOWNLOAD
             };
             let enabled = !self.busy
-                && self.listing(other(side)).is_some()
-                && !self.selection(hwnd, side).is_empty();
+                && self.listing(side.other()).is_some()
+                && !self.selection(hwnd, side, true).is_empty();
             unsafe { EnableWindow(item(hwnd, command), enabled as i32) };
         }
     }
@@ -391,7 +465,7 @@ impl View {
         }
     }
 
-    fn selection(&self, hwnd: HWND, side: Side) -> Vec<String> {
+    fn selection(&self, hwnd: HWND, side: Side, copyable: bool) -> Vec<String> {
         let Some(listing) = self.listing(side) else {
             return Vec::new();
         };
@@ -411,7 +485,7 @@ impl View {
             let Some(entry) = listing.entries.get(next as usize) else {
                 break;
             };
-            if entry.kind != Kind::Other {
+            if !copyable || entry.kind != Kind::Other {
                 names.push(entry.name.clone());
             }
             index = next;
@@ -458,43 +532,124 @@ impl View {
     }
 
     fn navigate(&mut self, hwnd: HWND, side: Side, row: i32) {
-        if let Some(view) = self.listing(side)
-            && let Some(Entry {
-                name,
-                kind: Kind::Directory,
-                ..
-            }) = view.entries.get(row as usize)
+        if let Some(entry) = self
+            .listing(side)
+            .and_then(|listing| listing.entries.get(row as usize))
         {
-            let path = if side == Side::Local {
-                std::path::Path::new(&view.path)
-                    .join(name)
-                    .to_string_lossy()
-                    .into_owned()
-            } else {
-                format!("{}/{name}", view.path.trim_end_matches('/'))
-            };
-            self.browse(hwnd, side, path, false);
+            self.open_entry(hwnd, side, &entry.name.clone());
+        }
+    }
+
+    fn open_entry(&mut self, hwnd: HWND, side: Side, name: &str) {
+        let Some(view) = self.listing(side) else {
+            return;
+        };
+        let Some(entry) = view.entries.iter().find(|entry| entry.name == name) else {
+            return;
+        };
+        let file = FileAddress {
+            side,
+            path: view.path.clone(),
+            name: name.to_owned(),
+        };
+        match entry.kind {
+            Kind::Directory => self.browse(hwnd, side, file.display(), false),
+            Kind::File => {
+                let request = Request::ReadText {
+                    side,
+                    path: file.path.clone(),
+                    name: file.name.clone(),
+                };
+                if self.request(hwnd, request, tr("Открываем файл…", "Opening file…"))
+                {
+                    self.pending = Some(Pending::Open(file));
+                }
+            }
+            Kind::Other => {}
         }
     }
 
     fn copy(&mut self, hwnd: HWND, side: Side, names: Vec<String>) {
-        if names.is_empty() {
+        if let Some(source) = self.listing(side) {
+            let data = FileClipboard {
+                side,
+                path: source.path.clone(),
+                names,
+                moving: false,
+            };
+            self.transfer(hwnd, data, side.other());
+        }
+    }
+
+    fn transfer(&mut self, hwnd: HWND, data: FileClipboard, destination_side: Side) {
+        let Some(target) = self.listing(destination_side) else {
+            return;
+        };
+        if data.names.is_empty() {
             return;
         }
-        let (Some(source), Some(target)) = (self.listing(side), self.listing(other(side))) else {
-            return;
-        };
         let request = Request::Copy {
-            side,
-            source: source.path.clone(),
+            side: data.side,
+            source: data.path,
             destination: target.path.clone(),
-            names,
+            names: data.names,
+            destination_side: Some(destination_side),
+            move_files: data.moving,
         };
-        if self.request(hwnd, request, tr("Передаём файлы…", "Transferring files…"))
-        {
-            self.copying = Some(other(side));
-            call(item(hwnd, PROGRESS), PBM_SETPOS, 0, 0);
-            unsafe { ShowWindow(item(hwnd, PROGRESS), SW_SHOW) };
+        let sides = if data.moving && data.side != destination_side {
+            VecDeque::from([destination_side, data.side])
+        } else {
+            VecDeque::from([destination_side])
+        };
+        let working = if data.moving {
+            tr("Перемещаем…", "Moving…")
+        } else {
+            tr("Передаём файлы…", "Transferring files…")
+        };
+        self.mutate(hwnd, request, working, sides, data.moving);
+    }
+
+    fn mutate(
+        &mut self,
+        hwnd: HWND,
+        request: Request,
+        working: &str,
+        sides: VecDeque<Side>,
+        moving: bool,
+    ) {
+        if self.request(hwnd, request, working) {
+            self.pending = Some(Pending::Change { sides, moving });
+        }
+    }
+
+    fn refresh_next(&mut self, hwnd: HWND) {
+        while let Some(side) = self.refresh.pop_front() {
+            if let Some(view) = self.listing(side) {
+                self.browse(hwnd, side, view.path.clone(), false);
+                if self.busy {
+                    return;
+                }
+            }
+        }
+        if let Some(status) = self.finished.take() {
+            set_caption(hwnd, STATUS, &status);
+        }
+    }
+
+    fn finish_change(&mut self, hwnd: HWND, status: String, success: bool) {
+        if let Some(Pending::Change { sides, moving }) = self.pending.take() {
+            if moving && success {
+                self.clipboard = None;
+            }
+            self.refresh = sides;
+            self.finished = Some(status);
+            self.refresh_next(hwnd);
+        } else if self.finished.is_some() {
+            let previous = self.finished.as_deref().unwrap_or_default();
+            self.finished = Some(format!("{previous}\n{status}"));
+            self.refresh_next(hwnd);
+        } else {
+            set_caption(hwnd, STATUS, &status);
         }
     }
 
@@ -504,56 +659,219 @@ impl View {
             let _ = question.answer.send(answer);
         }
         while let Ok(event) = self.events.try_recv() {
+            if let Event::Progress { progress } = event {
+                let percent = progress.total.filter(|&n| n > 0).map_or(0, |n| {
+                    ((progress.bytes.min(n) as u128 * 100) / n as u128) as usize
+                });
+                call(item(hwnd, PROGRESS), PBM_SETPOS, percent, 0);
+                unsafe { ShowWindow(item(hwnd, PROGRESS), SW_SHOW) };
+                set_caption(
+                    hwnd,
+                    STATUS,
+                    &format!("{} · {}", progress.name, listing_size(Some(progress.bytes))),
+                );
+                continue;
+            }
+            self.busy = false;
+            unsafe { ShowWindow(item(hwnd, PROGRESS), SW_HIDE) };
             match event {
-                Event::Progress { progress } => {
-                    let percent = progress.total.filter(|&n| n > 0).map_or(0, |n| {
-                        ((progress.bytes.min(n) as u128 * 100) / n as u128) as usize
-                    });
-                    call(item(hwnd, PROGRESS), PBM_SETPOS, percent, 0);
-                    set_caption(
-                        hwnd,
-                        STATUS,
-                        &format!("{} · {}", progress.name, listing_size(Some(progress.bytes))),
-                    );
-                    continue;
-                }
                 Event::Listing { listing } => {
                     let initial = self.local.is_none() && listing.side == Side::Local;
                     self.display(hwnd, listing);
-                    set_caption(
-                        hwnd,
-                        STATUS,
-                        self.finished
-                            .take()
-                            .as_deref()
-                            .unwrap_or(tr("Готово", "Ready")),
-                    );
-                    self.busy = false;
                     if initial {
                         self.browse(hwnd, Side::Remote, String::new(), false);
+                    } else if self.finished.is_some() {
+                        self.refresh_next(hwnd);
+                    } else {
+                        set_caption(hwnd, STATUS, tr("Готово", "Ready"));
                     }
                 }
-                Event::Copied { files } => {
-                    self.busy = false;
-                    self.finished = Some(tr_format!(
-                        "Скопировано файлов — {files}",
-                        "Files copied — {files}"
-                    ));
-                    if let Some(side) = self.copying.take()
-                        && let Some(view) = self.listing(side)
-                    {
-                        self.browse(hwnd, side, view.path.clone(), false);
+                Event::Copied { files } => self.finish_change(
+                    hwnd,
+                    tr_format!("Скопировано файлов — {files}", "Files copied — {files}"),
+                    true,
+                ),
+                Event::Changed { entries } => {
+                    let moving =
+                        matches!(&self.pending, Some(Pending::Change { moving: true, .. }));
+                    let status = if moving {
+                        tr_format!("Перемещено объектов — {entries}", "Items moved — {entries}")
+                    } else {
+                        tr("Готово", "Ready").into()
+                    };
+                    self.finish_change(hwnd, status, true);
+                }
+                Event::Text { text, revision } => {
+                    if let Some(Pending::Open(file)) = self.pending.take() {
+                        let side = file.side;
+                        set_caption(hwnd, STATUS, tr("Готово", "Ready"));
+                        if let Some(status) =
+                            editor::show(hwnd, file, text, revision, &self.commands, &self.events)
+                        {
+                            self.refresh = VecDeque::from([side]);
+                            self.finished = Some(status);
+                            self.refresh_next(hwnd);
+                        }
                     }
                 }
-                Event::Error { message } => {
-                    self.finished = None;
-                    self.copying = None;
-                    self.busy = false;
-                    set_caption(hwnd, STATUS, &message);
+                Event::Error { message } => self.finish_change(hwnd, message, false),
+                Event::Saved { .. } | Event::Progress { .. } => {}
+            }
+            self.controls(hwnd);
+        }
+    }
+
+    fn show_menu(&mut self, hwnd: HWND, side: Side, at: POINT) {
+        if self.busy || self.listing(side).is_none() {
+            return;
+        }
+        let names = self.selection(hwnd, side, false);
+        let copyable = !names.is_empty() && self.selection(hwnd, side, true) == names;
+        let selected = self.listing(side).and_then(|listing| {
+            (names.len() == 1)
+                .then(|| listing.entries.iter().find(|e| e.name == names[0]))
+                .flatten()
+        });
+        let Some(menu) = Popup::new() else {
+            return;
+        };
+        let folder = selected.is_some_and(|entry| entry.kind == Kind::Directory);
+        menu.add(
+            OPEN_FILE,
+            if folder {
+                tr("Открыть папку", "Open folder")
+            } else {
+                tr("Открыть в редакторе", "Open in editor")
+            },
+            selected.is_some_and(|entry| entry.kind != Kind::Other),
+        );
+        menu.separator();
+        menu.add(COPY_FILE, tr("Копировать", "Copy"), copyable);
+        menu.add(CUT_FILE, tr("Вырезать", "Cut"), copyable);
+        menu.add(
+            PASTE_FILE,
+            tr("Вставить", "Paste"),
+            self.clipboard.is_some(),
+        );
+        menu.separator();
+        menu.add(
+            RENAME_FILE,
+            tr("Переименовать…", "Rename…"),
+            selected.is_some(),
+        );
+        menu.add(NEW_FOLDER, tr("Новая папка…", "New folder…"), true);
+        menu.add(DELETE_FILE, tr("Удалить…", "Delete…"), !names.is_empty());
+        let command = unsafe {
+            TrackPopupMenu(
+                menu.0,
+                TPM_RETURNCMD | TPM_RIGHTBUTTON,
+                at.x,
+                at.y,
+                0,
+                hwnd,
+                null_mut(),
+            )
+        };
+        self.file_command(hwnd, side, command as usize);
+    }
+
+    fn file_command(&mut self, hwnd: HWND, side: Side, command: usize) {
+        if self.busy {
+            return;
+        }
+        let Some(path) = self.listing(side).map(|listing| listing.path.clone()) else {
+            return;
+        };
+        let names = self.selection(hwnd, side, false);
+        match command {
+            OPEN_FILE if names.len() == 1 => self.open_entry(hwnd, side, &names[0]),
+            COPY_FILE | CUT_FILE
+                if !names.is_empty() && names == self.selection(hwnd, side, true) =>
+            {
+                let count = names.len();
+                self.clipboard = Some(FileClipboard {
+                    side,
+                    path,
+                    names,
+                    moving: command == CUT_FILE,
+                });
+                let status = if command == CUT_FILE {
+                    tr_format!(
+                        "Вырезано — {count}. Выберите папку и нажмите «Вставить».",
+                        "Cut — {count}. Choose a folder and select Paste."
+                    )
+                } else {
+                    tr_format!(
+                        "Скопировано в буфер — {count}. Выберите папку и нажмите «Вставить».",
+                        "Copied — {count}. Choose a folder and select Paste."
+                    )
+                };
+                set_caption(hwnd, STATUS, &status);
+            }
+            PASTE_FILE => {
+                if let Some(data) = self.clipboard.clone() {
+                    self.transfer(hwnd, data, side);
                 }
             }
-            unsafe { ShowWindow(item(hwnd, PROGRESS), SW_HIDE) };
-            self.controls(hwnd);
+            RENAME_FILE | NEW_FOLDER if command == NEW_FOLDER || names.len() == 1 => {
+                let initial = if command == RENAME_FILE {
+                    names[0].as_str()
+                } else {
+                    ""
+                };
+                let caption = if command == RENAME_FILE {
+                    tr("Переименовать", "Rename")
+                } else {
+                    tr("Новая папка", "New folder")
+                };
+                if let Some(name) = prompt_name(hwnd, caption, &path, initial) {
+                    let request = if command == RENAME_FILE {
+                        if name == initial {
+                            return;
+                        }
+                        Request::Rename {
+                            side,
+                            path,
+                            name: initial.into(),
+                            new_name: name,
+                        }
+                    } else {
+                        Request::NewFolder { side, path, name }
+                    };
+                    self.mutate(hwnd, request, caption, VecDeque::from([side]), false);
+                }
+            }
+            DELETE_FILE if !names.is_empty() => {
+                let chosen = names.iter().take(5).cloned().collect::<Vec<_>>().join("\n");
+                let more = if names.len() > 5 {
+                    format!("\n… +{}", names.len() - 5)
+                } else {
+                    String::new()
+                };
+                let place = if side == Side::Local {
+                    tr("Этот компьютер", "This computer")
+                } else {
+                    &self.name
+                };
+                if message_box(
+                    hwnd,
+                    &format!(
+                        "{}\n\n{place} · {path}\n\n{chosen}{more}",
+                        tr("Удалить без корзины?", "Delete permanently?")
+                    ),
+                    MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2,
+                ) == IDYES
+                {
+                    self.mutate(
+                        hwnd,
+                        Request::Delete { side, path, names },
+                        tr("Удаляем…", "Deleting…"),
+                        VecDeque::from([side]),
+                        false,
+                    );
+                }
+            }
+            _ => {}
         }
     }
 
@@ -564,7 +882,7 @@ impl View {
             } else {
                 Side::Remote
             };
-            self.copy(hwnd, side, self.selection(hwnd, side));
+            self.copy(hwnd, side, self.selection(hwnd, side, true));
             return;
         }
         for side in [Side::Local, Side::Remote] {
@@ -574,6 +892,18 @@ impl View {
                     if let Some(path) = self.listing(side).and_then(|view| view.parent.clone()) {
                         self.browse(hwnd, side, path, false);
                     }
+                }
+                ACTIONS => {
+                    let mut rect = RECT::default();
+                    unsafe { GetWindowRect(item(hwnd, id), &mut rect) };
+                    self.show_menu(
+                        hwnd,
+                        side,
+                        POINT {
+                            x: rect.left,
+                            y: rect.bottom,
+                        },
+                    );
                 }
                 GO | REFRESH => self.browse(
                     hwnd,
@@ -591,7 +921,7 @@ impl View {
         let mut bounds = RECT::default();
         unsafe {
             GetCursorPos(&mut pointer) != 0
-                && GetWindowRect(item(hwnd, number(other(source)) + ROWS), &mut bounds) != 0
+                && GetWindowRect(item(hwnd, number(source.other()) + ROWS), &mut bounds) != 0
                 && PtInRect(&bounds, pointer) != 0
         }
     }
@@ -629,14 +959,14 @@ unsafe extern "system" fn dialog(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -
             }
         }
         WM_CLOSE => {
-            if view.copying.is_none() {
+            if !matches!(&view.pending, Some(Pending::Change { .. })) {
                 unsafe { EndDialog(hwnd, 0) };
             }
         }
         WM_COMMAND => {
             let id = (wp & 0xffff) as i32;
             if id == IDCANCEL {
-                if view.copying.is_none() {
+                if !matches!(&view.pending, Some(Pending::Change { .. })) {
                     unsafe {
                         EndDialog(hwnd, 0);
                     }
@@ -663,9 +993,61 @@ unsafe extern "system" fn dialog(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -
                     );
                     view.navigate(hwnd, side, row as i32);
                 }
-                LVN_BEGINDRAG if !view.busy && view.listing(other(side)).is_some() => {
+                NM_RCLICK if !view.busy => {
+                    let hit = unsafe { &*(lp as *const NMITEMACTIVATE) };
+                    let row = hit.iItem;
+                    if row < 0
+                        || call(
+                            notice.hwndFrom,
+                            LVM_GETITEMSTATE,
+                            row as usize,
+                            LVIS_SELECTED as LPARAM,
+                        ) == 0
+                    {
+                        let mut state = LVITEMW {
+                            stateMask: LVIS_SELECTED,
+                            ..Default::default()
+                        };
+                        call(
+                            notice.hwndFrom,
+                            LVM_SETITEMSTATE,
+                            usize::MAX,
+                            (&state as *const LVITEMW) as LPARAM,
+                        );
+                        if row >= 0 {
+                            state.state = LVIS_SELECTED;
+                            call(
+                                notice.hwndFrom,
+                                LVM_SETITEMSTATE,
+                                row as usize,
+                                (&state as *const LVITEMW) as LPARAM,
+                            );
+                        }
+                    }
+                    let mut point = POINT::default();
+                    unsafe { GetCursorPos(&mut point) };
+                    view.show_menu(hwnd, side, point);
+                }
+                LVN_KEYDOWN if !view.busy => {
+                    let key = unsafe {
+                        std::ptr::addr_of!((*(lp as *const NMLVKEYDOWN)).wVKey).read_unaligned()
+                    };
+                    let command = match key {
+                        VK_F2 => RENAME_FILE,
+                        VK_DELETE => DELETE_FILE,
+                        _ if unsafe { GetKeyState(VK_CONTROL as i32) } < 0 => match key as u8 {
+                            b'C' => COPY_FILE,
+                            b'X' => CUT_FILE,
+                            b'V' => PASTE_FILE,
+                            _ => return 0,
+                        },
+                        _ => return 0,
+                    };
+                    view.file_command(hwnd, side, command);
+                }
+                LVN_BEGINDRAG if !view.busy && view.listing(side.other()).is_some() => {
                     let drag = unsafe { &*(lp as *const NMLISTVIEW) };
-                    let mut names = view.selection(hwnd, side);
+                    let mut names = view.selection(hwnd, side, true);
                     if let Some(entry) = view
                         .listing(side)
                         .and_then(|list| list.entries.get(drag.iItem as usize))
@@ -724,6 +1106,8 @@ unsafe extern "system" fn dialog(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -
 
 struct Prompt<'a> {
     message: &'a str,
+    title: &'a str,
+    initial: &'a str,
     secret: bool,
     answer: Option<String>,
 }
@@ -733,11 +1117,32 @@ fn show_question(hwnd: HWND, message: &str, kind: QuestionKind) -> Option<String
         return (message_box(hwnd, message, MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) == IDYES)
             .then(|| "yes".into());
     }
-    let mut prompt = Prompt {
-        message,
-        secret: matches!(kind, QuestionKind::Secret),
-        answer: None,
-    };
+    show_prompt(
+        hwnd,
+        Prompt {
+            message,
+            title: "SSHI",
+            initial: "",
+            secret: matches!(kind, QuestionKind::Secret),
+            answer: None,
+        },
+    )
+}
+
+fn prompt_name(hwnd: HWND, title: &str, message: &str, initial: &str) -> Option<String> {
+    show_prompt(
+        hwnd,
+        Prompt {
+            message,
+            title,
+            initial,
+            secret: false,
+            answer: None,
+        },
+    )
+}
+
+fn show_prompt(hwnd: HWND, mut prompt: Prompt<'_>) -> Option<String> {
     unsafe {
         DialogBoxParamW(
             GetModuleHandleW(null_mut()),
@@ -754,11 +1159,14 @@ unsafe extern "system" fn input_dialog(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
     if msg == WM_INITDIALOG {
         unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, lp) };
         let prompt = unsafe { &*(lp as *const Prompt<'_>) };
+        set_text(hwnd, prompt.title);
         set_caption(hwnd, PROMPT, prompt.message);
         set_caption(hwnd, IDCANCEL, tr("Отмена", "Cancel"));
         call(item(hwnd, ANSWER), EM_LIMITTEXT, 4096, 0);
         if !prompt.secret {
             call(item(hwnd, ANSWER), EM_SETPASSWORDCHAR, 0, 0);
+            set_caption(hwnd, ANSWER, prompt.initial);
+            call(item(hwnd, ANSWER), EM_SETSEL, 0, -1);
         }
         return 1;
     }

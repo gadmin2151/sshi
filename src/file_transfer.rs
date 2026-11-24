@@ -1,16 +1,19 @@
-//! Shared SFTP transfers for the CLI and desktop clients.
+//! Shared file transfers and file browser operations.
+mod editor;
+mod operations;
+
 use std::{
     env,
-    io::ErrorKind,
     path::{Component, Path, PathBuf},
     time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail, ensure};
 use clap::Args;
+use operations::{Copier, Location};
 use russh_sftp::{
     client::{Config, SftpSession, error::Error as SftpError},
-    protocol::{FileAttributes, OpenFlags, StatusCode},
+    protocol::{FileAttributes, StatusCode},
 };
 use serde::{Deserialize, Serialize};
 use tokio::{
@@ -131,18 +134,68 @@ pub enum Request {
         source: String,
         destination: String,
         names: Vec<String>,
+        #[serde(default)]
+        destination_side: Option<Side>,
+        #[serde(default)]
+        move_files: bool,
     },
+    Rename {
+        side: Side,
+        path: String,
+        name: String,
+        new_name: String,
+    },
+    Delete {
+        side: Side,
+        path: String,
+        names: Vec<String>,
+    },
+    NewFolder {
+        side: Side,
+        path: String,
+        name: String,
+    },
+    ReadText {
+        side: Side,
+        path: String,
+        name: String,
+    },
+    SaveText {
+        side: Side,
+        path: String,
+        name: String,
+        text: String,
+        revision: String,
+    },
+}
+
+impl Side {
+    pub fn other(self) -> Self {
+        match self {
+            Self::Local => Self::Remote,
+            Self::Remote => Self::Local,
+        }
+    }
 }
 
 impl Request {
     pub fn needs_sftp(&self) -> bool {
-        !matches!(
-            self,
-            Self::List {
-                side: Side::Local,
+        match self {
+            Self::Copy {
+                side,
+                destination_side,
                 ..
+            } => {
+                *side == Side::Remote
+                    || destination_side.unwrap_or_else(|| side.other()) == Side::Remote
             }
-        )
+            Self::List { side, .. }
+            | Self::Rename { side, .. }
+            | Self::Delete { side, .. }
+            | Self::NewFolder { side, .. }
+            | Self::ReadText { side, .. }
+            | Self::SaveText { side, .. } => *side == Side::Remote,
+        }
     }
 
     pub fn reconnects(&self) -> bool {
@@ -167,10 +220,29 @@ pub struct Progress {
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
-    Listing { listing: Listing },
-    Progress { progress: Progress },
-    Copied { files: u64 },
-    Error { message: String },
+    Listing {
+        listing: Listing,
+    },
+    Progress {
+        progress: Progress,
+    },
+    Copied {
+        files: u64,
+    },
+    Changed {
+        entries: usize,
+    },
+    Text {
+        text: String,
+        revision: String,
+    },
+    Saved {
+        revision: String,
+        warning: Option<String>,
+    },
+    Error {
+        message: String,
+    },
 }
 
 pub async fn handle(
@@ -195,42 +267,106 @@ pub async fn handle(
             source,
             destination,
             names,
+            destination_side,
+            move_files,
         } => {
-            let sftp = sftp.context("connect to the remote computer first")?;
-            ensure!(!names.is_empty(), "select files or folders to copy");
-            for name in &names {
-                ensure_leaf(name)?;
+            let source = Location::directory(side, &source, sftp)?;
+            let target = Location::directory(
+                destination_side.unwrap_or_else(|| side.other()),
+                &destination,
+                sftp,
+            )?;
+            let names = children(&source, names)?;
+            let targets = names
+                .iter()
+                .map(|(name, _)| target.child(name))
+                .collect::<Result<Vec<_>>>()?;
+            let mut copier = Copier::new(true, |progress| emit(Event::Progress { progress }));
+            let entries = names.len();
+            for (index, ((name, source), target)) in names.into_iter().zip(targets).enumerate() {
+                copier
+                    .item(&source, &target, move_files)
+                    .await
+                    .with_context(|| {
+                        let action = if move_files { "move" } else { "copy" };
+                        format!("{action} {name:?} ({index} items completed)")
+                    })?;
             }
-            let mut copier = Copier::new(sftp, true, |progress| emit(Event::Progress { progress }));
-            for name in names {
-                let result = match side {
-                    Side::Local => {
-                        copier
-                            .upload(
-                                &Path::new(&source).join(&name),
-                                &join_remote(&destination, &name),
-                                0,
-                            )
-                            .await
-                    }
-                    Side::Remote => {
-                        copier
-                            .download(
-                                &join_remote(&source, &name),
-                                &Path::new(&destination).join(&name),
-                                0,
-                            )
-                            .await
-                    }
-                };
-                result
-                    .with_context(|| format!("copy {name:?} ({} files completed)", copier.files))?;
+            if move_files {
+                Ok(Event::Changed { entries })
+            } else {
+                Ok(Event::Copied {
+                    files: copier.files,
+                })
             }
-            Ok(Event::Copied {
-                files: copier.files,
-            })
+        }
+        Request::Rename {
+            side,
+            path,
+            name,
+            new_name,
+        } => {
+            let directory = Location::directory(side, &path, sftp)?;
+            let source = directory.child(&name)?;
+            let target = directory.child(&new_name)?;
+            source.rename_to(&target).await?;
+            Ok(Event::Changed { entries: 1 })
+        }
+        Request::Delete { side, path, names } => {
+            let directory = Location::directory(side, &path, sftp)?;
+            let names = children(&directory, names)?;
+            let entries = names.len();
+            for (index, (name, path)) in names.into_iter().enumerate() {
+                path.remove_tree(0)
+                    .await
+                    .with_context(|| format!("delete {name:?} ({index} items completed)"))?;
+            }
+            Ok(Event::Changed { entries })
+        }
+        Request::NewFolder { side, path, name } => {
+            Location::directory(side, &path, sftp)?
+                .child(&name)?
+                .create_dir()
+                .await?;
+            Ok(Event::Changed { entries: 1 })
+        }
+        Request::ReadText { side, path, name } => {
+            editor::read(&Location::directory(side, &path, sftp)?.child(&name)?).await
+        }
+        Request::SaveText {
+            side,
+            path,
+            name,
+            text,
+            revision,
+        } => {
+            editor::save(
+                &Location::directory(side, &path, sftp)?.child(&name)?,
+                &revision,
+                &text,
+            )
+            .await
         }
     }
+}
+
+fn children<'a>(
+    directory: &Location<'a>,
+    names: Vec<String>,
+) -> Result<Vec<(String, Location<'a>)>> {
+    ensure!(!names.is_empty(), "select one or more files or folders");
+    let mut seen = std::collections::HashSet::new();
+    names
+        .into_iter()
+        .map(|name| {
+            ensure!(
+                seen.insert(name.clone()),
+                "file name {name:?} was selected more than once"
+            );
+            let path = directory.child(&name)?;
+            Ok((name, path))
+        })
+        .collect()
 }
 
 async fn list_local(path: &str) -> Result<Listing> {
@@ -309,7 +445,7 @@ async fn list_remote(sftp: &SftpSession, path: &str) -> Result<Listing> {
         .with_context(|| format!("list remote folder {path:?}"))?
         .filter_map(|item| {
             let name = item.file_name();
-            if ensure_leaf(&name).is_err() {
+            if ensure_remote_name(&name).is_err() {
                 return None;
             }
             let meta = item.metadata();
@@ -350,7 +486,16 @@ fn remote_kind(meta: &FileAttributes) -> Kind {
     }
 }
 
+fn ensure_remote_name(name: &str) -> Result<()> {
+    ensure!(
+        !name.is_empty() && !name.contains(['/', '\0']) && !matches!(name, "." | ".."),
+        "invalid file name {name:?}"
+    );
+    Ok(())
+}
+
 fn ensure_leaf(name: &str) -> Result<()> {
+    ensure_remote_name(name)?;
     let mut parts = Path::new(name).components();
     ensure!(
         !name.contains('/')
@@ -359,10 +504,31 @@ fn ensure_leaf(name: &str) -> Result<()> {
         "invalid file name {name:?}"
     );
     #[cfg(windows)]
-    ensure!(
-        !name.contains(['\\', ':', '\"', '<', '>', '|', '?', '*']) && !name.ends_with([' ', '.']),
-        "file name {name:?} is not supported on Windows"
-    );
+    {
+        let stem = name
+            .split('.')
+            .next()
+            .unwrap_or_default()
+            .trim_end()
+            .to_ascii_uppercase();
+        let device = matches!(
+            stem.as_str(),
+            "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+        ) || (stem.starts_with("COM") || stem.starts_with("LPT"))
+            && matches!(
+                &stem[3..],
+                "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+            );
+        ensure!(
+            !device
+                && !name
+                    .chars()
+                    .any(|ch| ch < ' '
+                        || matches!(ch, '\\' | ':' | '"' | '<' | '>' | '|' | '?' | '*'))
+                && !name.ends_with([' ', '.']),
+            "file name {name:?} is not supported on Windows"
+        );
+    }
     Ok(())
 }
 
@@ -401,39 +567,32 @@ pub async fn copy(
     recursive: bool,
     progress: impl FnMut(Progress),
 ) -> Result<u64> {
-    let mut copier = Copier::new(sftp, recursive, progress);
-    match transfer {
-        Transfer::Upload { local, mut remote } => {
-            if remote_metadata(sftp, &remote)
-                .await?
-                .is_some_and(|info| info.file_type().is_dir())
-            {
-                remote = join_remote(&remote, local_name(&local)?);
+    let mut copier = Copier::new(recursive, progress);
+    let (source, target) = match transfer {
+        Transfer::Upload { local, remote } => {
+            let mut target = Location::Remote(sftp, remote);
+            if target.kind().await? == Some(Kind::Directory) {
+                target = target.child(local_name(&local)?)?;
             }
-            copier
-                .upload(&local, &remote, 0)
-                .await
-                .with_context(|| format!("copy {local:?} to {remote:?}"))?;
+            (Location::Local(local), target)
         }
-        Transfer::Download { remote, mut local } => {
-            if fs::symlink_metadata(&local)
-                .await
-                .is_ok_and(|info| info.is_dir())
-            {
+        Transfer::Download { remote, local } => {
+            let mut target = Location::Local(local);
+            if target.kind().await? == Some(Kind::Directory) {
                 let name = remote
                     .trim_end_matches('/')
                     .rsplit('/')
                     .next()
                     .unwrap_or_default();
-                ensure_leaf(name)?;
-                local.push(name);
+                target = target.child(name)?;
             }
-            copier
-                .download(&remote, &local, 0)
-                .await
-                .with_context(|| format!("copy {remote:?} to {local:?}"))?;
+            (Location::Remote(sftp, remote), target)
         }
-    }
+    };
+    copier
+        .item(&source, &target, false)
+        .await
+        .with_context(|| format!("copy {source} to {target}"))?;
     Ok(copier.files)
 }
 
@@ -444,174 +603,13 @@ pub fn print_progress(progress: Progress) {
     }
 }
 
-struct Copier<'a, P> {
-    sftp: &'a SftpSession,
-    recursive: bool,
-    files: u64,
-    progress: P,
-}
-
-impl<'a, P: FnMut(Progress)> Copier<'a, P> {
-    fn new(sftp: &'a SftpSession, recursive: bool, progress: P) -> Self {
-        Self {
-            sftp,
-            recursive,
-            files: 0,
-            progress,
-        }
-    }
-
-    async fn upload(&mut self, source: &Path, target: &str, depth: usize) -> Result<()> {
-        let meta = fs::symlink_metadata(source)
-            .await
-            .with_context(|| format!("inspect local path {source:?}"))?;
-        if meta.is_dir() {
-            ensure!(self.recursive, "use -r to copy a folder");
-            ensure!(
-                depth < 128,
-                "nested folders exceed the transfer depth limit"
-            );
-            self.sftp
-                .create_dir(target)
-                .await
-                .with_context(|| format!("create target folder {target:?}"))?;
-            let mut cursor = fs::read_dir(source).await?;
-            while let Some(entry) = cursor.next_entry().await? {
-                let path = entry.path();
-                let remote = join_remote(target, local_name(&path)?);
-                Box::pin(self.upload(&path, &remote, depth + 1)).await?;
-            }
-            return Ok(());
-        }
-        ensure!(
-            meta.is_file(),
-            "only regular files and folders can be copied: {source:?}"
-        );
-        ensure!(
-            remote_metadata(self.sftp, target).await?.is_none(),
-            "target {target:?} exists; choose a new name"
-        );
-        let mut input = fs::File::open(source)
-            .await
-            .with_context(|| format!("read {source:?}"))?;
-        let temporary = join_remote(
-            remote_parent(target),
-            &format!(".sshi-{:032x}.part", rand::random::<u128>()),
-        );
-        let mut output = self
-            .sftp
-            .open_with_flags_and_attributes(
-                temporary.as_str(),
-                OpenFlags::CREATE | OpenFlags::EXCLUDE | OpenFlags::WRITE,
-                FileAttributes {
-                    permissions: Some(0o600),
-                    ..Default::default()
-                },
-            )
-            .await
-            .with_context(|| format!("create temporary file in {:?}", remote_parent(target)))?;
-        let result: Result<()> = async {
-            let name = source.file_name().unwrap_or_default().to_string_lossy();
-            transfer_data(
-                &mut input,
-                &mut output,
-                &name,
-                Some(meta.len()),
-                &mut self.progress,
-            )
-            .await?;
-            output
-                .close()
-                .await
-                .context("finish writing the remote file")?;
-            self.sftp
-                .rename(temporary.as_str(), target)
-                .await
-                .with_context(|| format!("publish {target:?}"))?;
-            Ok(())
-        }
-        .await;
-        if result.is_err() {
-            let _ = self.sftp.remove_file(temporary).await;
-        }
-        result?;
-        self.files += 1;
-        Ok(())
-    }
-
-    async fn download(&mut self, source: &str, target: &Path, depth: usize) -> Result<()> {
-        let meta = remote_metadata(self.sftp, source)
-            .await?
-            .with_context(|| format!("remote path {source:?} does not exist"))?;
-        if meta.file_type().is_dir() {
-            ensure!(self.recursive, "use -r to copy a folder");
-            ensure!(
-                depth < 128,
-                "nested folders exceed the transfer depth limit"
-            );
-            fs::create_dir(target)
-                .await
-                .with_context(|| format!("create target folder {target:?}"))?;
-            for entry in self.sftp.read_dir(source).await? {
-                let name = entry.file_name();
-                if matches!(name.as_str(), "." | "..") {
-                    continue;
-                }
-                ensure_leaf(&name)?;
-                Box::pin(self.download(
-                    &join_remote(source, &name),
-                    &target.join(&name),
-                    depth + 1,
-                ))
-                .await?;
-            }
-            return Ok(());
-        }
-        ensure!(
-            meta.file_type().is_file(),
-            "only regular files and folders can be copied: {source:?}"
-        );
-        match fs::symlink_metadata(target).await {
-            Ok(_) => bail!("target {target:?} exists; choose a new name"),
-            Err(error) if error.kind() == ErrorKind::NotFound => {}
-            Err(error) => return Err(error).with_context(|| format!("inspect {target:?}")),
-        }
-        let parent = target
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or(Path::new("."));
-        let temporary = tempfile::Builder::new()
-            .prefix(".sshi-")
-            .suffix(".part")
-            .tempfile_in(parent)
-            .with_context(|| format!("create temporary file in {parent:?}"))?;
-        let mut output = fs::File::from_std(temporary.reopen()?);
-        let mut input = self
-            .sftp
-            .open(source)
-            .await
-            .with_context(|| format!("read {source:?}"))?;
-        let name = source.rsplit('/').next().unwrap_or(source);
-        transfer_data(&mut input, &mut output, name, meta.size, &mut self.progress).await?;
-        output
-            .shutdown()
-            .await
-            .context("finish writing the local file")?;
-        drop(output);
-        temporary
-            .persist_noclobber(target)
-            .with_context(|| format!("publish {target:?}"))?;
-        self.files += 1;
-        Ok(())
-    }
-}
-
 async fn transfer_data(
     input: &mut (impl AsyncRead + Unpin),
     output: &mut (impl AsyncWrite + Unpin),
     name: &str,
     total: Option<u64>,
     progress: &mut impl FnMut(Progress),
+    mut digest: Option<&mut blake3::Hasher>,
 ) -> Result<()> {
     let mut bytes = 0;
     let mut status = Instant::now();
@@ -630,6 +628,9 @@ async fn transfer_data(
             .write_all(&buffer[..read])
             .await
             .context("write file data")?;
+        if let Some(digest) = digest.as_deref_mut() {
+            digest.update(&buffer[..read]);
+        }
         bytes += read as u64;
         if status.elapsed() >= Duration::from_millis(180) {
             progress(Progress {

@@ -221,7 +221,21 @@ def smoke(base):
         command([sshi, "cp", destination_path, download], tx)
         assert download.read_bytes() == payload
         assert command([sshi, "--cp", source, destination_path], tx, check=False).returncode != 0
-        print("macOS CLI copied an SFTP file in both directions through Iroh", flush=True)
+        notes = base / "mac notes.txt"
+        notes.write_bytes(b"hello\r\n")
+        worker = [sshi, "__files", "--", profile]
+        path = {"side": "remote", "path": str(base), "name": notes.name}
+        def request(action, **fields):
+            payload = json.dumps({"action": action, **path, **fields}).encode() + b"\n"
+            return json.loads(command(worker, tx, data=payload).stdout)
+        document = request("read_text")
+        assert document["type"] == "text" and document["text"] == "hello\n"
+        result = request("save_text", text="edited\n", revision=document["revision"])
+        assert result["type"] == "saved" and notes.read_bytes() == b"edited\r\n"
+        result = request("rename", new_name="mac renamed.txt")
+        assert result["type"] == "changed" and (base / "mac renamed.txt").read_bytes() == b"edited\r\n"
+        print("macOS CLI and desktop file protocol copied, edited and renamed files over SFTP", flush=True)
+
 
 
 if __name__ == "__main__":

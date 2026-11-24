@@ -6,6 +6,7 @@ import json
 import os
 import pathlib
 import re
+import select
 import shlex
 import socket
 import subprocess
@@ -118,6 +119,71 @@ def check_file_transfers(profile, env, base):
     assert events[-1]["type"] == "error" and "invalid file name" in events[-1]["message"]
     assert (base / "another-tree" / source.name).read_bytes() == payload
     print("SFTP upload and download, recursive copy, desktop session and no-clobber: pass", flush=True)
+
+def check_file_actions(profile, env, base):
+    folders = {side: base / f"managed {side}" for side in ("local", "remote")}
+    original = b"\xef\xbb\xbffirst\r\nsecond\r\n"
+    edited = b"\xef\xbb\xbffirst\r\nchanged\r\n"
+    name = "конфиг [1].txt"
+    for folder in folders.values():
+        folder.mkdir()
+        (folder / name).write_bytes(original)
+        (folder / name).chmod(0o640)
+    with subprocess.Popen(["sshi", "__files", "--", profile], env=env, stdin=subprocess.PIPE,
+                          stdout=subprocess.PIPE, bufsize=0) as worker:
+        def ask(action, side, expected, **kwargs):
+            request = {"action": action, "side": side, **kwargs}
+            worker.stdin.write((json.dumps(request) + "\n").encode())
+            while True:
+                assert select.select([worker.stdout], [], [], 25)[0], request
+                event = json.loads(worker.stdout.readline())
+                if event["type"] != "progress":
+                    assert event["type"] == expected, (request, event)
+                    return event
+
+        for side, directory in folders.items():
+            path = str(directory)
+            text = ask("read_text", side, "text", path=path, name=name)
+            assert text["text"] == "first\nsecond\n"
+            save = ask("save_text", side, "saved", path=path, name=name, text="first\nchanged\n", revision=text["revision"])
+            assert save["revision"] != text["revision"] and save["warning"] is None
+            assert (directory / name).read_bytes() == edited
+            assert (directory / name).stat().st_mode & 0o777 == 0o640
+            stale = ask("save_text", side, "error", path=path, name=name, text="stale edit", revision=text["revision"])
+            assert "changed after it was opened" in stale["message"] and (directory / name).read_bytes() == edited
+            ask("new_folder", side, "changed", path=path, name="copies")
+            ask("new_folder", side, "changed", path=path, name="moves")
+            renamed = "renamed.txt"
+            ask("rename", side, "changed", path=path, name=name, new_name=renamed)
+            assert not (directory / name).exists()
+            (directory / "existing.txt").write_text("keep me")
+            ask("rename", side, "error", path=path, name=renamed, new_name="existing.txt")
+            assert (directory / "existing.txt").read_text() == "keep me" and (directory / renamed).exists()
+            ask("copy", side, "copied", source=path, destination=str(directory / "copies"),
+                destination_side=side, names=[renamed])
+            ask("copy", side, "changed", source=path, destination=str(directory / "moves"),
+                destination_side=side, move_files=True, names=[renamed])
+            assert not (directory / renamed).exists()
+            assert (directory / "copies" / renamed).read_bytes() == (directory / "moves" / renamed).read_bytes() == edited
+            (directory / "link").symlink_to(directory / "existing.txt")
+            ask("read_text", side, "error", path=path, name="link")
+            ask("delete", side, "error", path=path, names=["link", "../outside"])
+            assert (directory / "link").is_symlink()
+            ask("delete", side, "changed", path=path, names=["link", "moves"])
+            assert (directory / "existing.txt").read_text() == "keep me" and not (directory / "link").exists()
+            assert not (directory / "moves").exists()
+
+        remote, local = folders["remote"], folders["local"]
+        ask("new_folder", "local", "changed", path=str(local), name="incoming")
+        ask("copy", "remote", "changed", source=str(remote), destination=str(local / "incoming"),
+            destination_side="local", move_files=True, names=["copies"])
+        assert (local / "incoming" / "copies" / "renamed.txt").read_bytes() == edited
+        assert not (remote / "copies").exists()
+        for directory in folders.values():
+            assert not list(directory.rglob(".sshi-*"))
+        worker.stdin.close()
+        assert worker.wait(timeout=10) == 0
+    print("Desktop file mutations, concurrent edits, BOM and CRLF, no-clobber, and cross-pane folder move: pass", flush=True)
 
 def check_profile_socket(profile, destination, env, sshd_log):
     def action(name):
@@ -335,6 +401,7 @@ with tempfile.TemporaryDirectory(prefix="sshi.") as tmp:
                                "--endpoint", receiver_id], env=initiator), "create desktop profile")
                     check_profile_socket(profile_name, destination, initiator, sshd_log)
                     check_file_transfers(profile_name, initiator, base)
+                    check_file_actions(profile_name, initiator, base)
                     for kind in ("local", "remote", "dynamic"):
                         with socket.socket() as sock:
                             sock.bind(("127.0.0.1", 0))

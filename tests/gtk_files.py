@@ -1,4 +1,4 @@
-"""Check the GTK file action, list navigation and both transfer directions."""
+"""Check GTK file navigation, transfer, editing and file manager actions."""
 import json
 import os
 from pathlib import Path
@@ -34,6 +34,12 @@ with open({str(log)!r}, "a") as log:
             event = {{"type": "listing", "listing": {{"path": path, "side": side, "parent": "/",
                 "entries": [{{"name": "Reports", "kind": "directory", "size": None}},
                             {{"name": name, "kind": "file", "size": 1024}}]}}}}
+        elif request["action"] == "read_text":
+            event = {{"type": "text", "text": "original", "revision": "one"}}
+        elif request["action"] == "save_text":
+            event = {{"type": "saved", "revision": "two", "warning": None}}
+        elif request["action"] != "copy" or request.get("move_files"):
+            event = {{"type": "changed", "entries": 1}}
         else:
             event = {{"type": "copied", "files": len(request["names"])}}
         print(json.dumps(event), flush=True)
@@ -86,10 +92,54 @@ with open({str(log)!r}, "a") as log:
     remote.tree.row_activated(Gtk.TreePath.new_from_indices([0]), remote.tree.get_column(0))
     wait(lambda: not pane.busy and remote.path == "/remote/Reports")
     assert requests()[-1]["path"] == "/remote/Reports"
+    remote.tree.row_activated(Gtk.TreePath.new_from_indices([1]), remote.tree.get_column(0))
+    editors = lambda: [w for w in Gtk.Window.list_toplevels() if isinstance(w, module.FileEditor)]
+    wait(lambda: bool(editors()))
+    editor, = editors()
+    assert editor.value() == "original" and not editor.save_button.get_sensitive()
+    editor.buffer.set_text("изменено\n")
+    editor.save_button.clicked()
+    wait(lambda: editor.revision == "two" and not editor.saving)
+    assert requests()[-1] == {"action": "save_text", "side": "remote", "path": "/remote/Reports", "name": "отчёт.bin",
+                               "text": "изменено\n", "revision": "one"}
+    editor.close_editor()
+    wait(lambda: not pane.busy)
+    assert not editors()
+
+    remote.tree.get_selection().select_path(Gtk.TreePath.new_from_indices([1]))
+    pane.remember(remote, True)
+    pane.paste(local)
+    wait(lambda: not pane.busy and pane.file_clipboard is None)
+    moves = [request for request in requests() if request.get("move_files")]
+    assert len(moves) == 1 and moves[0]["source"] == "/remote/Reports" and moves[0]["destination_side"] == "local"
+
+    name = "переименован.txt"
+    remote.tree.get_selection().select_path(Gtk.TreePath.new_from_indices([1]))
+
+    def respond():
+        dialog, = [w for w in Gtk.Window.list_toplevels() if isinstance(w, Gtk.Dialog) and w.get_title() == "Переименовать"]
+        field, = [widget for widget in relevant(dialog) if isinstance(widget, Gtk.Entry)]
+        assert field.get_text() == "отчёт.bin"
+        field.set_text(name)
+        dialog.response(Gtk.ResponseType.OK)
+        return False
+
+    module.GLib.idle_add(respond)
+    pane.name_entry(remote, True)
+    wait(lambda: not pane.busy)
+    assert requests()[-2]["action"] == "rename" and requests()[-2]["new_name"] == name
+    remote.tree.get_selection().select_path(Gtk.TreePath.new_from_indices([1]))
+    with patch.object(module, "file_confirm", return_value=False):
+        pane.delete_entries(remote)
+        assert not pane.busy
+    with patch.object(module, "file_confirm", return_value=True):
+        pane.delete_entries(remote)
+    wait(lambda: not pane.busy)
+    assert requests()[-2]["action"] == "delete" and requests()[-2]["names"] == ["отчёт.bin"]
     pane.destroy()
     pane.worker.wait(timeout=5)
     root.destroy()
-    print("GTK file pane entry point, upload, remote-to-local drag and folder navigation passed")
+    print("GTK file navigation, drag, editor, cut/paste, rename and delete confirmation passed")
 
 
 if __name__ == "__main__":

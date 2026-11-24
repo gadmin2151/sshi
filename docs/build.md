@@ -1,6 +1,6 @@
 # Сборка SSHI
 
-Версия пакетов берётся из `Cargo.toml`. Для выпуска 0.4.1 используется Rust 1.96 и зафиксированный `Cargo.lock`.
+Версия пакетов берётся из `Cargo.toml`. Для выпуска 0.5.0 используется Rust 1.96 и зафиксированный `Cargo.lock`.
 
 ## Linux
 
@@ -18,14 +18,14 @@ Docker Buildx собирает три DEB с glibc из Debian 11. Для RPM и
 
 ```sh
 docker buildx build --platform linux/amd64 -f packaging/Dockerfile --output type=local,dest=dist .
-sh packaging/build-rpm.sh dist/sshi_0.4.1_amd64.deb
-sh packaging/build-rpm.sh dist/sshi_0.4.1_arm64.deb
+sh packaging/build-rpm.sh dist/sshi_0.5.0_amd64.deb
+sh packaging/build-rpm.sh dist/sshi_0.5.0_arm64.deb
 ```
 
 На Arch Linux или CachyOS установите `base-devel` и соберите пакет для pacman из готового amd64 DEB под обычным пользователем.
 
 ```sh
-bash packaging/build-arch.sh dist/sshi_0.4.1_amd64.deb dist
+bash packaging/build-arch.sh dist/sshi_0.5.0_amd64.deb dist
 ```
 
 ## Windows x64
@@ -59,7 +59,7 @@ Workflow в `.github/workflows/release.yml` собирает и проверяе
 
 ```sh
 cargo install --locked --version 1.5.0 --debug --features server iroh-relay
-tests/run-relay-smoke.sh dist/sshi_0.4.1_amd64.deb
+tests/run-relay-smoke.sh dist/sshi_0.5.0_amd64.deb
 ```
 
 Тест запускает отдельные SSH-сервер и relay, создаёт временные идентичности, активирует и отзывает приглашение, проверяет интерактивный вход, код возврата удалённой команды, параллельные сеансы и передачу данных через `-L`, `-R` и `-D`. Все три режима также проверяются через команду `sshi forward`, которую запускает графический клиент.

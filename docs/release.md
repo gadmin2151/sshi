@@ -1,15 +1,15 @@
-# SSHI 0.4.1
+# SSHI 0.5.0
 
-## Заметки к подключениям
+## Новый интерфейс подключений
 
-- Выберите профиль и откройте **«Заметки»**, чтобы сохранить многострочную запись на Linux, macOS или Windows.
-- Запись сохраняется при переименовании и редактировании профиля. Резервные копии включают заметки и переносят их между платформами.
-- На Linux и macOS заметки доступны через `sshi profile notes --name NAME`. Добавьте `--set`, чтобы заменить текст данными из stdin.
+- На Linux, macOS и Windows сохранённые подключения отображаются в адаптивной сетке карточек. Поиск работает по имени, SSH-логину и Endpoint ID.
+- Нижняя панель выбранного профиля показывает Endpoint ID и relay. Из неё можно скопировать полный ID, открыть файлы или запустить терминал в отдельном окне.
+- Редактирование профиля, заметки, приглашения, установка SSH-ключа и проброс портов доступны через меню **«Действия»**.
 
-## Connection notes
+## Redesigned connection manager
 
-- Open **Notes** on a saved connection to write a multiline note on Linux, macOS, or Windows.
-- Notes follow the profile when you edit or rename it. Connection backups include notes and can transfer them between platforms.
-- On Linux and macOS, use `sshi profile notes --name NAME` to read a note. Add `--set` to replace it with text from stdin.
+- Saved connections appear in a responsive card grid on Linux, macOS, and Windows. Search by profile name, SSH username, or Endpoint ID.
+- The selected profile’s bottom panel shows its Endpoint ID and relay. Copy the full ID, open files, or launch a separate terminal window from the panel.
+- The **Actions** menu contains profile editing, notes, invitations, SSH key installation, and port forwarding.
 
-[Руководство / Setup guide](https://github.com/gadmin2151/sshi/blob/v0.4.1/README.md) · [Файлы и редактор / Files and editor](https://github.com/gadmin2151/sshi/releases/tag/v0.4.0)
+[Руководство / Setup guide](https://github.com/gadmin2151/sshi/blob/v0.5.0/README.md)

@@ -27,7 +27,7 @@ use windows_sys::Win32::{
                 CommDlgExtendedError, GetOpenFileNameW, GetSaveFileNameW, OFN_FILEMUSTEXIST,
                 OFN_NOCHANGEDIR, OFN_PATHMUSTEXIST, OPENFILENAMEW,
             },
-            EM_SETCUEBANNER, EM_SETSEL, ICC_LISTVIEW_CLASSES, INITCOMMONCONTROLSEX,
+            EM_LIMITTEXT, EM_SETCUEBANNER, EM_SETSEL, ICC_LISTVIEW_CLASSES, INITCOMMONCONTROLSEX,
             InitCommonControlsEx, LVCF_WIDTH, LVCOLUMNW, LVIF_TEXT, LVIS_FOCUSED, LVIS_SELECTED,
             LVITEMW, LVM_DELETEALLITEMS, LVM_EDITLABELW, LVM_GETEDITCONTROL, LVM_GETNEXTITEM,
             LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMSTATE,
@@ -35,7 +35,7 @@ use windows_sys::Win32::{
             LVS_EX_FULLROWSELECT, LVS_NOCOLUMNHEADER, LVS_REPORT, LVS_SHOWSELALWAYS, LVS_SINGLESEL,
             NM_CLICK, NM_DBLCLK, NM_KILLFOCUS, NMHDR, NMITEMACTIVATE, NMLISTVIEW, NMLVDISPINFOW,
         },
-        Input::KeyboardAndMouse::{SetFocus, VK_F2, VK_RETURN},
+        Input::KeyboardAndMouse::{EnableWindow, SetFocus, VK_F2, VK_RETURN},
         Shell::ShellExecuteW,
         WindowsAndMessaging::*,
     },
@@ -79,6 +79,7 @@ const MANUAL: u16 = 120;
 const CHECK_UPDATES: u16 = 121;
 const OPEN_UPDATE: u16 = 122;
 const FILES: u16 = 123;
+const NOTES: u16 = 124;
 const UPDATE_TIMER: usize = 1;
 const UPDATE_RESULT_TIMER: usize = 2;
 const UPDATE_INTERVAL_MS: u32 = 6 * 60 * 60 * 1000;
@@ -88,6 +89,10 @@ const STYLE: u32 = WS_OVERLAPPEDWINDOW;
 const INVITATION_DIALOG: usize = 2;
 const INVITATION_CODE: i32 = 2001;
 const COPY_INVITATION: i32 = 2002;
+const NOTES_DIALOG: usize = 10;
+const NOTES_PROFILE: i32 = 4101;
+const NOTES_TEXT: i32 = 4102;
+const NOTES_ERROR: i32 = 4103;
 
 #[derive(Default)]
 struct Controls {
@@ -104,6 +109,7 @@ struct Controls {
     relay: HWND,
     token: HWND,
     ssh_key: HWND,
+    notes: HWND,
     my_id: HWND,
     status: HWND,
 }
@@ -577,6 +583,7 @@ impl View {
             ISSUE_INVITE,
         )?;
         self.button(hwnd, "Проброс портов…", [291, 533, 199, 29], FORWARD)?;
+        self.controls.notes = self.button(hwnd, "Заметки…", [505, 533, 153, 29], NOTES)?;
         self.button(hwnd, "Сохранить", [761, 533, 145, 29], SAVE)?;
         self.controls.status = self.label(hwnd, "", [22, 571, 883, 20])?;
         set_text(self.controls.my_id, &self.id.to_string());
@@ -627,7 +634,7 @@ impl View {
         unsafe { SendMessageW(result, WM_SETFONT, self.font as usize, 1) };
         let horizontal = match id {
             OPEN_DATA | BROWSE | COPY | ENROLL | INSTALL_SSH_KEY | ISSUE_INVITE | SAVE
-            | CONNECT | FILES | FORWARD | OPEN_UPDATE => Anchor::End,
+            | CONNECT | FILES | FORWARD | NOTES | OPEN_UPDATE => Anchor::End,
             _ if is_edit && rect[2] >= 400 => Anchor::Stretch,
             _ => Anchor::Start,
         };
@@ -914,6 +921,7 @@ impl View {
             SAVE => self.save()?,
             CONNECT => self.connect()?,
             FILES => self.spawn_terminal("--files")?,
+            NOTES => self.edit_notes(hwnd)?,
             INSTALL_SSH_KEY => self.spawn_terminal("--copy-ssh-key")?,
             ISSUE_INVITE => {
                 if text(self.controls.endpoint).trim().is_empty() {
@@ -1135,7 +1143,10 @@ impl View {
             "Добавьте Endpoint ID получателя, чтобы подключиться",
             "Enter the receiver endpoint ID to connect",
         ));
-        unsafe { SetFocus(self.controls.name) };
+        unsafe {
+            EnableWindow(self.controls.notes, 0);
+            SetFocus(self.controls.name);
+        }
     }
 
     fn select(&mut self, index: usize) -> Result<()> {
@@ -1146,6 +1157,7 @@ impl View {
         let token = String::from_utf8(crypt(&profile.relay_token, false)?)
             .context(tr("Прочитать токен relay", "Read the relay token"))?;
         self.selected = Some(index);
+        unsafe { EnableWindow(self.controls.notes, 1) };
         set_text(self.controls.name, &profile.name);
         set_text(self.controls.user, &profile.user);
         set_text(self.controls.endpoint, &profile.endpoint.to_string());
@@ -1195,12 +1207,13 @@ impl View {
             } else {
                 relay.to_string()
             },
+            notes: String::new(),
             ssh_key: text(self.controls.ssh_key).trim().to_owned(),
             relay_token: crypt(token.trim().as_bytes(), true)?,
         })
     }
 
-    fn persist_profile(&mut self, profile: Profile, index: Option<usize>) -> Result<usize> {
+    fn persist_profile(&mut self, mut profile: Profile, index: Option<usize>) -> Result<usize> {
         profile.portable().validate()?;
         let mut updated = self.profiles.clone();
         if updated.iter().enumerate().any(|(row, old)| {
@@ -1212,9 +1225,11 @@ impl View {
             ));
         }
         let selected = if let Some(index) = index {
-            *updated
+            let previous = updated
                 .get_mut(index)
-                .context(tr("Подключение отсутствует", "Connection not found"))? = profile;
+                .context(tr("Подключение отсутствует", "Connection not found"))?;
+            profile.notes = std::mem::take(&mut previous.notes);
+            *previous = profile;
             index
         } else {
             updated.push(profile);
@@ -1231,6 +1246,38 @@ impl View {
         self.refresh_list(Some(selected));
         self.select(selected)?;
         self.status(tr("Подключение сохранено", "Connection saved"));
+        Ok(())
+    }
+
+    fn edit_notes(&mut self, hwnd: HWND) -> Result<()> {
+        let Some(profile) = self.selected.and_then(|index| self.profiles.get_mut(index)) else {
+            return Ok(());
+        };
+        let mut prompt = NotesPrompt {
+            store: &self.store,
+            name: &profile.name,
+            notes: &profile.notes,
+            saved: None,
+        };
+        let result = unsafe {
+            DialogBoxParamW(
+                self.instance,
+                NOTES_DIALOG as *const u16,
+                hwnd,
+                Some(notes_dialog),
+                (&mut prompt as *mut NotesPrompt<'_>) as LPARAM,
+            )
+        };
+        ensure!(
+            result != -1,
+            "{}: {}",
+            tr("Открыть заметки", "Open the notes editor"),
+            last_error()
+        );
+        if let Some(notes) = prompt.saved {
+            profile.notes = notes;
+            self.status(tr("Заметки сохранены", "Notes saved"));
+        }
         Ok(())
     }
 
@@ -1277,6 +1324,7 @@ impl View {
         if profile.name.is_empty() {
             profile.name = format!("{}@{}", profile.user, profile.endpoint.fmt_short());
         }
+        profile.notes.clear();
         Command::new(env::current_exe()?)
             .arg(mode)
             .args(args)
@@ -1307,6 +1355,69 @@ impl Drop for View {
             DeleteObject(self.header_brush);
         }
     }
+}
+
+struct NotesPrompt<'a> {
+    store: &'a Store,
+    name: &'a str,
+    notes: &'a str,
+    saved: Option<String>,
+}
+
+unsafe extern "system" fn notes_dialog(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> isize {
+    if msg == WM_INITDIALOG {
+        unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, lp) };
+        let prompt = unsafe { &*(lp as *const NotesPrompt<'_>) };
+        let field = unsafe { GetDlgItem(hwnd, NOTES_TEXT) };
+        set_text(hwnd, tr("Заметки", "Notes"));
+        set_text(unsafe { GetDlgItem(hwnd, NOTES_PROFILE) }, prompt.name);
+        set_text(unsafe { GetDlgItem(hwnd, IDOK) }, tr("Сохранить", "Save"));
+        set_text(
+            unsafe { GetDlgItem(hwnd, IDCANCEL) },
+            tr("Отмена", "Cancel"),
+        );
+        unsafe { SendMessageW(field, EM_LIMITTEXT, 0, 0) };
+        set_text(
+            field,
+            &prompt
+                .notes
+                .replace("\r\n", "\n")
+                .replace('\r', "\n")
+                .replace('\n', "\r\n"),
+        );
+        return 1;
+    }
+    if msg == WM_COMMAND {
+        match (wp & 0xffff) as i32 {
+            IDOK => {
+                let pointer =
+                    unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut NotesPrompt<'_>;
+                let Some(prompt) = (unsafe { pointer.as_mut() }) else {
+                    return 0;
+                };
+                let field = unsafe { GetDlgItem(hwnd, NOTES_TEXT) };
+                let notes = text(field).replace("\r\n", "\n");
+                if notes != prompt.notes.replace("\r\n", "\n").replace('\r', "\n") {
+                    if let Err(error) = prompt.store.set_notes(prompt.name, &notes) {
+                        set_text(
+                            unsafe { GetDlgItem(hwnd, NOTES_ERROR) },
+                            &format!("{error:#}"),
+                        );
+                        return 1;
+                    }
+                    prompt.saved = Some(notes);
+                }
+                unsafe { EndDialog(hwnd, 1) };
+                return 1;
+            }
+            IDCANCEL => {
+                unsafe { EndDialog(hwnd, 0) };
+                return 1;
+            }
+            _ => {}
+        }
+    }
+    0
 }
 
 pub(super) fn set_text(handle: HWND, value: &str) {

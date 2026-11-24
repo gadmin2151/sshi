@@ -50,6 +50,7 @@ pub fn caption(source: &'static str) -> &'static str {
         "Добавить SSH-ключ…" => "Install SSH key…",
         "Создать приглашение…" => "Create invitation…",
         "Проброс портов…" => "Port forwarding…",
+        "Заметки…" => "Notes…",
         "Сохранить" => "Save",
         "Подключиться" => "Connect",
         "Терминал" => "Terminal",

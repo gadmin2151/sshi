@@ -194,6 +194,94 @@ fn backup_restores_named_connections_and_legacy_history_without_identity_files()
 }
 
 #[test]
+fn notes_survive_edits_and_merge_with_backups_without_overwriting_other_notes() -> Result<()> {
+    let f = Fixture::new()?;
+    let peer = SecretKey::generate().public().to_string();
+    for name in ["-lab", "Office"] {
+        f.run(&[
+            "profile",
+            "save",
+            "--name",
+            name,
+            "--user",
+            "pi",
+            "--endpoint",
+            &peer,
+        ])?;
+    }
+    let notes = "Проверить журнал\n\n  Check after restart.\n";
+    let set = |fixture: &Fixture, name: &str, notes: &str| -> Result<()> {
+        let mut child = fixture
+            .command()
+            .args(["profile", "notes", "--name", name, "--set"])
+            .stdin(Stdio::piped())
+            .spawn()?;
+        child
+            .stdin
+            .take()
+            .context("open note input")?
+            .write_all(notes.as_bytes())?;
+        ensure!(child.wait()?.success(), "save profile notes");
+        Ok(())
+    };
+    set(&f, "-lab", notes)?;
+    assert!(f.run(&["profile", "notes", "--name", "Office"])?.is_empty());
+    f.run(&["profile", "rename", "--name", "-lab", "--to", "Lab A"])?;
+    f.run(&[
+        "profile",
+        "save",
+        "--previous",
+        "Lab A",
+        "--name",
+        "Lab B",
+        "--user",
+        "worker",
+        "--endpoint",
+        &peer,
+    ])?;
+    let printed = f
+        .command()
+        .args(["profile", "notes", "--name", "Lab B"])
+        .output()?;
+    assert!(printed.status.success());
+    assert_eq!(printed.stdout, notes.as_bytes());
+
+    let backup = f.dir().join("notes.json");
+    let old_backup = f.dir().join("legacy.json");
+    f.run(&["backup", backup.to_str().unwrap()])?;
+    let mut legacy: Value = serde_json::from_slice(&fs::read(&backup)?)?;
+    legacy["connections"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("notes");
+    fs::write(&old_backup, serde_json::to_vec(&legacy)?)?;
+    let restored = Fixture::new()?;
+    for source in [&old_backup, &backup, &old_backup] {
+        restored.run(&["restore", source.to_str().unwrap()])?;
+    }
+    let profiles = restored.json(&["profile", "list", "--json"])?;
+    assert_eq!(profiles[0]["notes"], notes);
+    assert!(profiles[1].get("notes").is_none());
+    set(&restored, "Lab B", "A different note")?;
+    let conflict = restored
+        .command()
+        .args(["restore", backup.to_str().unwrap()])
+        .output()?;
+    assert!(!conflict.status.success());
+    assert_eq!(
+        restored.run(&["profile", "notes", "--name", "Lab B"])?,
+        "A different note"
+    );
+    set(&restored, "Lab B", "")?;
+    assert!(
+        restored.json(&["profile", "list", "--json"])?[0]
+            .get("notes")
+            .is_none()
+    );
+    Ok(())
+}
+
+#[test]
 fn rename_changes_only_the_profile_name_and_rejects_conflicts_atomically() -> Result<()> {
     let f = Fixture::new()?;
     let id = SecretKey::generate().public().to_string();

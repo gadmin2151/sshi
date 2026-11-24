@@ -279,6 +279,7 @@ mod tests {
             user: "operator".into(),
             endpoint: iroh::SecretKey::from_bytes(&[2; 32]).public(),
             relay: "https://relay.example/".into(),
+            notes: String::new(),
         };
         let path = socket_path(dir, &profile, key);
         profile.name = "Workshop".into();

@@ -49,12 +49,23 @@ struct TestProfileClicks {
         precondition(AppLanguage.current(in: defaults) == .russian)
         defaults.set("en", forKey: AppLanguage.preferenceKey)
         let restored = AppLanguage.current(in: UserDefaults(suiteName: suite)!)
-        precondition(restored == .english && restored.whatsNew == "What’s new in 0.4.0")
+        precondition(restored == .english && restored.whatsNew == "What’s new in 0.4.1")
         precondition(ForwardKind.remote.title(restored) == "Access from there")
         precondition(AppLanguage.russian.commandError("Error: duplicate connection name 'old'").contains("уже существует"))
         precondition(restored.commandError("Error: invalid SSH username").contains("Check the SSH username"))
         defaults.set("unknown", forKey: AppLanguage.preferenceKey)
         precondition(AppLanguage.current(in: defaults) == .russian)
+    }
+
+    static func testProfileNotes() throws {
+        let legacy = Data(#"{"name":"Lab","user":"pi","endpoint":"test","relay":""}"#.utf8)
+        var profile = try JSONDecoder().decode(Profile.self, from: legacy)
+        precondition(profile.notes == nil)
+        let socketKey = profile.socketKey
+        profile.notes = "Проверить журнал\nCheck the log"
+        let saved = try JSONEncoder().encode(profile)
+        let restored = try JSONDecoder().decode(Profile.self, from: saved)
+        precondition(restored.notes == profile.notes && restored.socketKey == socketKey)
     }
 
     @MainActor
@@ -255,6 +266,7 @@ struct TestProfileClicks {
     static func runWindowTests() throws {
         try testForwarding()
         testLanguage()
+        try testProfileNotes()
         print("Forwarding arguments, address preview, validation and persistent language passed")
         let application = NSApplication.shared
         application.setActivationPolicy(.regular)

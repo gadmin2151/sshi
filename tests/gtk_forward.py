@@ -71,7 +71,7 @@ def check(binary, root):
         combo, = [widget for widget in children(dialog) if isinstance(widget, Gtk.ComboBoxText)]
         assert combo.get_active_id() == "ru"
         link, = [widget for widget in children(dialog) if isinstance(widget, Gtk.LinkButton)]
-        assert link.get_uri() == module.RELEASE_URL and link.get_label() == "Что нового в 0.4.0"
+        assert link.get_uri() == module.RELEASE_URL and link.get_label() == "Что нового в 0.4.1"
         combo.set_active_id("en")
         return Gtk.ResponseType.OK
 
@@ -297,8 +297,30 @@ def check(binary, root):
             assert argv[:4] == ["/usr/bin/konsole", "--separate", "-e", "/bin/sh"]
             assert argv[-3:] == ["--report-socket-start", report, special_name]
             assert spawned.call_args.kwargs == {"start_new_session": True}
+    window.reload("Test station")
+    notes = "Проверить настройки\n\nCheck after restart."
+
+    def write_notes(dialog):
+        assert dialog.get_title() == "Notes"
+        editor, = [widget for widget in children(dialog) if isinstance(widget, Gtk.TextView)]
+        editor.get_buffer().set_text(notes)
+        return Gtk.ResponseType.OK
+
+    with_dialog(lambda: click_action("Add…"), write_notes)
+    window.reload("Test station")
+    assert any(isinstance(w, Gtk.Label) and w.get_text() == notes for w in children(window))
+
+    def discard_notes(dialog):
+        editor, = [widget for widget in children(dialog) if isinstance(widget, Gtk.TextView)]
+        buffer = editor.get_buffer()
+        assert buffer.get_text(*buffer.get_bounds(), True) == notes
+        buffer.set_text("Discard this draft")
+        return Gtk.ResponseType.CANCEL
+
+    with_dialog(lambda: click_action("Edit…"), discard_notes)
+    assert json.loads(module.cli("profile", "list", "--json"))[0]["notes"] == notes
     window.destroy()
-    print("GTK settings, translations, port forwarding, control socket actions and update notifications passed")
+    print("GTK notes, settings, translations, forwarding, sockets and update notifications passed")
 
 
 if __name__ == "__main__":

@@ -9,9 +9,11 @@ struct Profile: Codable, Hashable, Identifiable {
     let user: String
     let endpoint: String
     let relay: String
+    var notes: String? = nil
 
     var id: String { name }
     var destination: String { "\(user)@\(endpoint)" }
+    var socketKey: [String] { [name, user, endpoint, relay] }
     var prefix: [String] { ["profile", "run", "--name", name, "--"] }
     func socket(_ action: String, batch: Bool = false) -> [String] {
         ["socket", action] + (batch ? ["--batch"] : []) + ["--", name]
@@ -119,6 +121,7 @@ struct SheetItem: Identifiable {
         case editor(Panel)
         case invitation(InvitationStart)
         case files(Profile)
+        case notes(Profile)
     }
     let content: Content
 }
@@ -131,7 +134,7 @@ final class Workspace: ObservableObject {
     @Published var sheet: SheetItem?
     @Published var feedback: String?
     @Published var busy = false
-    var socketErrors: [Profile: String] = [:]
+    var socketErrors: [[String]: String] = [:]
     @Published var update: ReleaseUpdate?
     @Published var checkingUpdate = false
     @Published var updateError: String?
@@ -299,7 +302,8 @@ struct ProfileDetail: View {
                     field("Relay", profile.relay.isEmpty ? language("Из настроек SSHI", "From SSHI settings") : profile.relay)
                 }.padding(15).frame(maxWidth: .infinity, alignment: .leading)
                     .background(Color(nsColor: .quaternaryLabelColor).opacity(0.36), in: RoundedRectangle(cornerRadius: 10))
-                SocketControls(workspace: workspace, profile: profile, language: language).id(profile)
+                SocketControls(workspace: workspace, profile: profile, language: language).id(profile.socketKey)
+                notesCard
                 Text(language("Инструменты подключения", "Connection tools")).font(.headline)
                 Divider()
                 HStack(spacing: 16) {
@@ -315,6 +319,69 @@ struct ProfileDetail: View {
                 }
             }.padding(30).frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+
+    private var notesCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(language("Заметки", "Notes")).font(.headline)
+                Spacer()
+                Button(profile.notes?.isEmpty == false ? language("Изменить…", "Edit…") : language("Добавить…", "Add…")) {
+                    workspace.sheet = SheetItem(content: .notes(profile))
+                }
+            }
+            if let notes = profile.notes, !notes.isEmpty {
+                Text(verbatim: notes).lineLimit(3).textSelection(.enabled)
+            }
+        }
+        .padding(14).frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+    }
+}
+
+@MainActor
+private struct ProfileNotesSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject var workspace: Workspace
+    let profile: Profile
+    let language: AppLanguage
+    @State private var notes: String
+    @State private var error = ""
+    @FocusState private var focused: Bool
+
+    init(workspace: Workspace, profile: Profile, language: AppLanguage) {
+        self.workspace = workspace
+        self.profile = profile
+        self.language = language
+        _notes = State(initialValue: profile.notes ?? "")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(language("Заметки", "Notes")).font(.headline)
+            Text(verbatim: profile.name).foregroundColor(.secondary)
+            TextEditor(text: $notes).focused($focused)
+                .accessibilityLabel(language("Текст заметки", "Note text"))
+                .frame(minHeight: 210).border(Color.secondary.opacity(0.22))
+            if !error.isEmpty { Text(error).foregroundColor(.red).textSelection(.enabled) }
+            HStack {
+                Spacer()
+                Button(language("Отмена", "Cancel")) { dismiss() }.keyboardShortcut(.cancelAction)
+                Button(language("Сохранить", "Save")) { save() }
+                    .buttonStyle(.borderedProminent).keyboardShortcut("s", modifiers: .command)
+                    .disabled(notes == (profile.notes ?? ""))
+            }
+        }
+        .padding(18).frame(width: 515)
+        .onAppear { focused = true }
+    }
+
+    private func save() {
+        do {
+            try Client.run(["profile", "notes", "--name", profile.name, "--set"], input: notes)
+            try workspace.reload()
+            dismiss()
+        } catch { self.error = error.localizedDescription }
     }
 }
 
@@ -624,6 +691,7 @@ struct WorkspaceView: View {
             case .editor(let panel): Editor(workspace: workspace, panel: panel)
             case .invitation(let start): InvitationSheet(workspace: workspace, start: start)
             case .files(let profile): FileBrowser(profile: profile, language: language)
+            case .notes(let profile): ProfileNotesSheet(workspace: workspace, profile: profile, language: language)
             }
         }
         .alert("SSHI", isPresented: Binding(get: { workspace.feedback != nil }, set: { if !$0 { workspace.feedback = nil } })) {

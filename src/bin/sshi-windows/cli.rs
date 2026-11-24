@@ -275,6 +275,7 @@ fn from_destination(destination: &str, profiles: Vec<Profile>) -> Result<Profile
         endpoint,
         user: user.into(),
         relay: String::new(),
+        notes: String::new(),
         ssh_key: String::new(),
         relay_token: Vec::new(),
     })

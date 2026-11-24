@@ -65,7 +65,7 @@ struct SocketControls: View {
         .padding(14).frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
         .task {
-            if let error = workspace.socketErrors[profile] {
+            if let error = workspace.socketErrors[profile.socketKey] {
                 session.lastError = error
                 session.terminalRetry = true
             }
@@ -81,7 +81,7 @@ struct SocketControls: View {
             confirming = false
         }
         .onChange(of: session.lastError) { value in
-            workspace.socketErrors[profile] = value.isEmpty ? nil : value
+            workspace.socketErrors[profile.socketKey] = value.isEmpty ? nil : value
         }
         .onDisappear { session.dispose() }
     }

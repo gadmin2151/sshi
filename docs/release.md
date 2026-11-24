@@ -1,15 +1,15 @@
-# SSHI 0.4.0
+# SSHI 0.4.1
 
-## Файлы и редактор
+## Заметки к подключениям
 
-- Двойной щелчок по текстовому файлу открывает встроенный редактор в Linux, macOS и Windows. Изменения сохраняются обратно в выбранный файл.
-- В меню **«Действия»** каждой панели доступны копирование, вырезание, вставка, переименование, создание папок и удаление с подтверждением. Буфер позволяет переносить файлы и папки между компьютерами и внутри каждой стороны.
-- Редактор поддерживает UTF-8 до 2 МиБ и проверяет, изменился ли файл после открытия. Передача файлов сохраняет существующие файлы при совпадении имён.
+- Выберите профиль и откройте **«Заметки»**, чтобы сохранить многострочную запись на Linux, macOS или Windows.
+- Запись сохраняется при переименовании и редактировании профиля. Резервные копии включают заметки и переносят их между платформами.
+- На Linux и macOS заметки доступны через `sshi profile notes --name NAME`. Добавьте `--set`, чтобы заменить текст данными из stdin.
 
-## Files and editor
+## Connection notes
 
-- Double-click a text file to open the built-in editor on Linux, macOS, or Windows. Save changes directly to the selected file.
-- Use **Actions** or right-click in either pane to copy, cut, paste, rename, create a folder, or confirm deletion. The file clipboard works across both panes and within each side.
-- The editor supports UTF-8 files up to 2 MiB and checks for edits made after the file was opened. Conflicting transfers preserve existing files.
+- Open **Notes** on a saved connection to write a multiline note on Linux, macOS, or Windows.
+- Notes follow the profile when you edit or rename it. Connection backups include notes and can transfer them between platforms.
+- On Linux and macOS, use `sshi profile notes --name NAME` to read a note. Add `--set` to replace it with text from stdin.
 
-[Руководство / Setup guide](https://github.com/gadmin2151/sshi/blob/v0.4.0/README.md)
+[Руководство / Setup guide](https://github.com/gadmin2151/sshi/blob/v0.4.1/README.md) · [Файлы и редактор / Files and editor](https://github.com/gadmin2151/sshi/releases/tag/v0.4.0)

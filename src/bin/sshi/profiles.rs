@@ -2,11 +2,11 @@ use crate::state::State;
 use anyhow::{Context, Result, ensure};
 use clap::Subcommand;
 use iroh::EndpointId;
-use iroh_ssh::profiles::Profile;
+use iroh_ssh::profiles::{Profile, read_notes};
 use std::{
     env,
     ffi::OsString,
-    io::Read,
+    io::{self, Read, Write},
     os::unix::process::CommandExt,
     process::{Command, Stdio},
 };
@@ -39,6 +39,14 @@ pub enum Profiles {
         name: String,
         #[arg(long, allow_hyphen_values = true)]
         to: String,
+    },
+    /// Display a saved connection's notes or replace them with UTF-8 text from stdin.
+    Notes {
+        #[arg(long, allow_hyphen_values = true)]
+        name: String,
+        /// Replace the notes using standard input. Empty input clears them.
+        #[arg(long)]
+        set: bool,
     },
     /// Remove a named connection.
     Remove {
@@ -105,16 +113,18 @@ pub fn run(action: Profiles) -> Result<()> {
             relay,
             previous,
         } => {
-            let profile = Profile {
+            let mut profile = Profile {
                 name,
                 user,
                 endpoint,
                 relay,
+                notes: String::new(),
             };
             profile.validate()?;
             state.update_library(|library| {
                 if let Some(old) = previous {
                     let idx = profile_index(&library.connections, &old)?;
+                    profile.notes = std::mem::take(&mut library.connections[idx].notes);
                     library.connections[idx] = profile;
                 } else {
                     ensure!(
@@ -131,6 +141,20 @@ pub fn run(action: Profiles) -> Result<()> {
             library.connections[index].name = to;
             Ok(())
         }),
+        Profiles::Notes { name, set } => {
+            if set {
+                let notes = read_notes(io::stdin().lock())?;
+                state.update_library(|library| {
+                    let index = profile_index(&library.connections, &name)?;
+                    library.connections[index].notes = notes;
+                    Ok(())
+                })
+            } else {
+                Ok(io::stdout()
+                    .lock()
+                    .write_all(lookup(&name)?.notes.as_bytes())?)
+            }
+        }
         Profiles::Remove { name } => state.update_library(|library| {
             let index = profile_index(&library.connections, &name)?;
             library.connections.remove(index);

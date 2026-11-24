@@ -317,6 +317,7 @@ impl State<'_> {
             endpoint,
             user: route.user,
             relay: relay.clone(),
+            notes: String::new(),
             ssh_key: String::new(),
             relay_token: Vec::new(),
         });

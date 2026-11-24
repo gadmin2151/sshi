@@ -11,7 +11,7 @@ use std::{
 
 use anyhow::{Context, Result, bail, ensure};
 use iroh::{EndpointId, SecretKey};
-use iroh_ssh::profiles::{Backup, Profile as PortableProfile};
+use iroh_ssh::profiles::{Backup, Profile as PortableProfile, validate_notes};
 use russh::keys::{Algorithm, PrivateKey, ssh_key::LineEnding};
 use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
@@ -36,6 +36,8 @@ pub struct Profile {
     pub user: String,
     pub relay: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub notes: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub ssh_key: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub relay_token: Vec<u8>,
@@ -48,6 +50,7 @@ impl Profile {
             endpoint: self.endpoint,
             user: self.user.clone(),
             relay: self.relay.clone(),
+            notes: self.notes.clone(),
         }
     }
 }
@@ -163,6 +166,19 @@ impl Store {
         self.write_profiles(&profiles)
     }
 
+    pub fn set_notes(&self, name: &str, notes: &str) -> Result<()> {
+        validate_notes(notes)?;
+        let _lock = self.lock("profiles.lock", false)?;
+        let mut profiles = self.read_profiles()?;
+        let profile = profiles
+            .connections
+            .iter_mut()
+            .find(|p| p.name == name)
+            .context(tr("Подключение отсутствует", "Connection not found"))?;
+        notes.clone_into(&mut profile.notes);
+        self.write_profiles(&profiles)
+    }
+
     fn write_profiles(&self, profiles: &Profiles) -> Result<()> {
         let text = toml::to_string_pretty(profiles)?;
         let file = self.temp_file(text.as_bytes())?;
@@ -184,6 +200,9 @@ impl Store {
         let before = state.connections.len();
         let mut library = state.portable()?;
         library.merge(&backup)?;
+        for (local, portable) in state.connections.iter_mut().zip(&library.connections) {
+            local.notes.clone_from(&portable.notes);
+        }
         // merge appends new profiles after existing profiles. Leave local secrets
         // attached to their original profiles and carry only portable metadata in.
         state.connections.extend(
@@ -196,6 +215,7 @@ impl Store {
                     endpoint: incoming.endpoint,
                     user: incoming.user,
                     relay: incoming.relay,
+                    notes: incoming.notes,
                     ssh_key: String::new(),
                     relay_token: Vec::new(),
                 }),
@@ -430,10 +450,14 @@ mod tests {
             endpoint: SecretKey::generate().public(),
             user: "pi".into(),
             relay: "https://example.org/".into(),
+            notes: "Сверить журнал\nCheck the server log".into(),
             ssh_key: r"C:\Keys\example".into(),
             relay_token: vec![1, 2, 3],
         };
-        from.save_profiles(std::slice::from_ref(&profile))?;
+        let mut without_notes = profile.clone();
+        without_notes.notes.clear();
+        from.save_profiles(&[without_notes])?;
+        from.set_notes(&profile.name, &profile.notes)?;
         from.record_connection(&profile)?;
         let file = source.path().join("backup.json");
         from.backup(&file)?;
@@ -445,12 +469,16 @@ mod tests {
         let existing = from.profiles()?.remove(0);
         assert_eq!(existing.ssh_key, profile.ssh_key);
         assert_eq!(existing.relay_token, profile.relay_token);
+        assert_eq!(existing.notes, profile.notes);
         assert_eq!(to.restore(&file)?, 1);
         assert_eq!(to.restore(&file)?, 0);
         let imported = to.profiles()?.remove(0);
         assert_eq!(imported.portable(), profile.portable());
         assert!(imported.ssh_key.is_empty() && imported.relay_token.is_empty());
         assert_eq!(to.history()?, from.history()?);
+        to.set_notes(&profile.name, "")?;
+        assert_eq!(to.restore(&file)?, 0);
+        assert_eq!(to.profiles()?.remove(0).notes, profile.notes);
 
         let mut conflict = Backup::read(&file)?;
         conflict.connections[0].user = "other".into();

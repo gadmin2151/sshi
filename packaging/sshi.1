@@ -1,4 +1,4 @@
-.TH SSHI 1 "2026-11-23" "SSHI 0.4.0" "User Commands"
+.TH SSHI 1 "2026-11-23" "SSHI 0.4.1" "User Commands"
 .SH NAME
 sshi, sshi-copy-id, sshi-copy-iid \- use OpenSSH over an iroh relay
 .SH SYNOPSIS
@@ -86,7 +86,11 @@ Create a named connection or rename/edit the specified previous entry.
 Omit the relay to use this account's default.
 .TP
 .B profile rename \-\-name NAME \-\-to NEW_NAME
-Rename one saved connection. The change preserves its user, endpoint and relay.
+Rename one saved connection. The change preserves its user, endpoint, relay and notes.
+.TP
+.B profile notes \-\-name NAME [\-\-set]
+Print the saved notes. With \fB\-\-set\fR, replace the notes with UTF-8 text from
+standard input. Empty input clears the notes.
 .TP
 .B profile remove \-\-name NAME
 Remove the named connection.
@@ -143,13 +147,14 @@ platform, or the release page when no matching package is available. The graphic
 client checks in the background and offers a download when a newer version exists.
 .TP
 .B backup FILE
-Write all named connections and connection history to a new portable JSON file.
+Write all named connections, their notes and connection history to a new portable JSON file.
 Credentials, SSH keys, server fingerprints and the private Iroh identity remain
 in their local stores. The output file must have a new name.
 .TP
 .B restore FILE
 Merge a supported JSON backup. Conflicting names abort the import
-before any connection is changed. Matching entries are preserved.
+before any connection is changed. For matching profiles, notes from the backup fill empty notes.
+Different nonempty notes are a conflict.
 .TP
 .B config show [\-\-json]
 Show effective settings and their sources. Token values stay private.

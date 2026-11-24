@@ -138,6 +138,7 @@ pub async fn copy(args: CopyArgs) -> Result<()> {
             user: user.into(),
             endpoint,
             relay: String::new(),
+            notes: String::new(),
         },
         Err(_) => profiles::lookup(target)?,
     };

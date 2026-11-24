@@ -14,6 +14,30 @@ use tempfile::NamedTempFile;
 const VERSION: u32 = 1;
 const MAX_BYTES: u64 = 16 * 1024 * 1024;
 
+pub fn validate_notes(notes: &str) -> Result<()> {
+    ensure!(
+        !notes
+            .chars()
+            .any(|ch| ch.is_control() && !matches!(ch, '\n' | '\r' | '\t')),
+        "connection notes must be plain text"
+    );
+    ensure!(
+        notes.len() as u64 <= MAX_BYTES,
+        "connection notes exceed 16 MiB"
+    );
+    Ok(())
+}
+
+pub fn read_notes(input: impl Read) -> Result<String> {
+    let mut notes = String::new();
+    input
+        .take(MAX_BYTES + 1)
+        .read_to_string(&mut notes)
+        .context("read UTF-8 connection notes")?;
+    validate_notes(&notes)?;
+    Ok(notes)
+}
+
 pub fn valid_user(user: &str) -> bool {
     !user.is_empty()
         && user.len() <= 256
@@ -39,6 +63,8 @@ pub struct Profile {
     pub endpoint: EndpointId,
     #[serde(default)]
     pub relay: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub notes: String,
 }
 
 impl Profile {
@@ -58,6 +84,7 @@ impl Profile {
                 "a saved relay URL may not contain a query or fragment"
             );
         }
+        validate_notes(&self.notes)?;
         Ok(())
     }
 
@@ -174,15 +201,30 @@ impl Backup {
         let existing: HashMap<_, _> = self
             .connections
             .iter()
-            .map(|p| (p.name.to_lowercase(), p))
+            .enumerate()
+            .map(|(index, p)| (p.name.to_lowercase(), index))
             .collect();
         for other in &incoming.connections {
-            if let Some(current) = existing.get(&other.name.to_lowercase()) {
+            if let Some(&index) = existing.get(&other.name.to_lowercase()) {
+                let current = &mut updated.connections[index];
                 ensure!(
-                    *current == other,
+                    current.name == other.name
+                        && current.user == other.user
+                        && current.endpoint == other.endpoint
+                        && current.relay == other.relay,
                     "a different connection is already named '{}'; rename it before restoring",
                     other.name
                 );
+                ensure!(
+                    current.notes.is_empty()
+                        || other.notes.is_empty()
+                        || current.notes == other.notes,
+                    "connection '{}' has different notes; rename it before restoring",
+                    other.name
+                );
+                if current.notes.is_empty() {
+                    current.notes.clone_from(&other.notes);
+                }
             } else {
                 updated.connections.push(other.clone());
             }
@@ -211,6 +253,7 @@ mod tests {
             endpoint: SecretKey::generate().public(),
             user: "pi".into(),
             relay: String::new(),
+            notes: String::new(),
         }
     }
 

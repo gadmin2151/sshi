@@ -628,7 +628,9 @@ final class ProfileGrid: NSCollectionView, NSTextFieldDelegate {
     override func mouseDown(with event: NSEvent) {
         renameTimer?.invalidate()
         renameTimer = nil
-        window?.makeFirstResponder(self)
+        if let window = window, window.firstResponder !== self {
+            window.makeFirstResponder(self)
+        }
         guard let path = indexPathForItem(at: convert(event.locationInWindow, from: nil)),
               profiles.indices.contains(path.item), editingName == nil else {
             resetClicks()

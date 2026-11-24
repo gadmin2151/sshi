@@ -306,10 +306,13 @@ struct TestProfileClicks {
         var number = 0
         func click(_ index: Int, count: Int = 1) {
             let path = IndexPath(item: index, section: 0)
-            let rect = grid.collectionViewLayout!.layoutAttributesForItem(at: path)!.frame
-            let center = NSPoint(x: rect.midX, y: rect.midY)
-            let position = grid.convert(center, to: nil)
-            precondition(grid.indexPathForItem(at: center) == path, "the card must be hit at its center")
+            guard let card = grid.item(at: path) else {
+                fatalError("card \(index) must be onscreen, active items \(grid.indexPathsForVisibleItems()), grid \(grid.frame)")
+            }
+            let bounds = card.view.bounds
+            let position = card.view.convert(NSPoint(x: bounds.midX, y: bounds.midY), to: nil)
+            precondition(grid.cardPath(atWindowPoint: position) == path,
+                         "card \(index) must be hit at its center, bounds \(bounds), visible grid \(grid.visibleRect)")
             guard let target = grid.hitTest(grid.superview!.convert(position, from: nil)), target === grid else {
                 fatalError("a card click must reach the connection grid")
             }
@@ -333,6 +336,7 @@ struct TestProfileClicks {
 
         let settle = NSEvent.doubleClickInterval + 0.12
         drain(0.2)
+        window.contentView?.layoutSubtreeIfNeeded()
         click(0)
         drain(settle)
         precondition(opened.isEmpty && window.firstResponder === grid, "first click on initial selection")

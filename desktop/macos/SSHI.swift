@@ -625,13 +625,25 @@ final class ProfileGrid: NSCollectionView, NSTextFieldDelegate {
         return self
     }
 
+    func cardPath(atWindowPoint point: NSPoint) -> IndexPath? {
+        guard visibleRect.contains(convert(point, from: nil)) else { return nil }
+        // Use the rendered item bounds so scrolling and flipped coordinates are handled by AppKit.
+        for card in visibleItems() {
+            let view = card.view
+            if view.window === window && view.bounds.contains(view.convert(point, from: nil)) {
+                return indexPath(for: card)
+            }
+        }
+        return nil
+    }
+
     override func mouseDown(with event: NSEvent) {
         renameTimer?.invalidate()
         renameTimer = nil
         if let window = window, window.firstResponder !== self {
             window.makeFirstResponder(self)
         }
-        guard let path = indexPathForItem(at: convert(event.locationInWindow, from: nil)),
+        guard let path = cardPath(atWindowPoint: event.locationInWindow),
               profiles.indices.contains(path.item), editingName == nil else {
             resetClicks()
             return
@@ -652,7 +664,7 @@ final class ProfileGrid: NSCollectionView, NSTextFieldDelegate {
         let position = event.locationInWindow
         guard let press = press,
               abs(press.location.x - position.x) <= 6, abs(press.location.y - position.y) <= 6,
-              let path = indexPathForItem(at: convert(position, from: nil)),
+              let path = cardPath(atWindowPoint: position),
               path.item == selectedIndex, profiles.indices.contains(path.item),
               profiles[path.item].name == press.name else {
             resetClicks()

@@ -502,7 +502,39 @@ private final class ProfileCard: NSCollectionViewItem {
 }
 
 @MainActor
-final class ProfileGrid: NSCollectionView, NSCollectionViewDataSource, NSCollectionViewDelegateFlowLayout, NSTextFieldDelegate {
+final class ProfileGrid: NSCollectionView, NSTextFieldDelegate {
+    // AppKit forwards some collection callbacks through NSCollectionView itself.
+    // Using the view as its own delegate can recurse through those selectors.
+    @MainActor
+    private final class CollectionProvider: NSObject, NSCollectionViewDataSource, NSCollectionViewDelegateFlowLayout {
+        weak var grid: ProfileGrid?
+
+        func collectionView(_ collectionView: NSCollectionView, numberOfItemsInSection section: Int) -> Int {
+            grid?.profiles.count ?? 0
+        }
+
+        func collectionView(_ collectionView: NSCollectionView,
+                            itemForRepresentedObjectAt indexPath: IndexPath) -> NSCollectionViewItem {
+            let card = collectionView.makeItem(withIdentifier: ProfileGrid.cardID, for: indexPath) as! ProfileCard
+            if let grid = grid {
+                _ = card.view
+                card.configure(grid.profiles[indexPath.item], delegate: grid)
+            }
+            return card
+        }
+
+        func collectionView(_ collectionView: NSCollectionView, layout collectionViewLayout: NSCollectionViewLayout,
+                            sizeForItemAt indexPath: IndexPath) -> NSSize {
+            let width = max(collectionView.bounds.width, 1)
+            let columns = CGFloat(max(1, min(3, Int((width + 12) / 242))))
+            return NSSize(width: floor((width - 12 * (columns - 1)) / columns), height: 108)
+        }
+
+        func collectionView(_ collectionView: NSCollectionView, didSelectItemsAt indexPaths: Set<IndexPath>) {
+            if let index = indexPaths.first?.item { grid?.selectionChanged(to: index) }
+        }
+    }
+
     private struct CardPress {
         let name: String
         let location: NSPoint
@@ -512,6 +544,7 @@ final class ProfileGrid: NSCollectionView, NSCollectionViewDataSource, NSCollect
     private static let cardID = NSUserInterfaceItemIdentifier("profileCard")
     private let workspace: Workspace
     private let openProfile: (String) -> Void
+    private let provider = CollectionProvider()
     private var profiles: [Profile] = []
     private var syncing = false
     private var lastClicked: String?
@@ -532,8 +565,9 @@ final class ProfileGrid: NSCollectionView, NSCollectionViewDataSource, NSCollect
         allowsMultipleSelection = false
         allowsEmptySelection = false
         register(ProfileCard.self, forItemWithIdentifier: Self.cardID)
-        delegate = self
-        dataSource = self
+        provider.grid = self
+        delegate = provider
+        dataSource = provider
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
@@ -562,32 +596,14 @@ final class ProfileGrid: NSCollectionView, NSCollectionViewDataSource, NSCollect
         }
     }
 
-    func collectionView(_ collectionView: NSCollectionView, numberOfItemsInSection section: Int) -> Int {
-        profiles.count
-    }
-
-    func collectionView(_ collectionView: NSCollectionView, itemForRepresentedObjectAt indexPath: IndexPath) -> NSCollectionViewItem {
-        let card = makeItem(withIdentifier: Self.cardID, for: indexPath) as! ProfileCard
-        _ = card.view
-        card.configure(profiles[indexPath.item], delegate: self)
-        return card
-    }
-
-    func collectionView(_ collectionView: NSCollectionView, layout collectionViewLayout: NSCollectionViewLayout,
-                        sizeForItemAt indexPath: IndexPath) -> NSSize {
-        let width = max(bounds.width, 1)
-        let columns = CGFloat(max(1, min(3, Int((width + 12) / 242))))
-        return NSSize(width: floor((width - 12 * (columns - 1)) / columns), height: 108)
-    }
-
     override func setFrameSize(_ newSize: NSSize) {
         let widthChanged = newSize.width != frame.width
         super.setFrameSize(newSize)
         if widthChanged { collectionViewLayout?.invalidateLayout() }
     }
 
-    func collectionView(_ collectionView: NSCollectionView, didSelectItemsAt indexPaths: Set<IndexPath>) {
-        guard !syncing, let index = indexPaths.first?.item, profiles.indices.contains(index) else { return }
+    private func selectionChanged(to index: Int) {
+        guard !syncing, profiles.indices.contains(index) else { return }
         let name = profiles[index].name
         if name != lastClicked { resetClicks() }
         workspace.selected = name

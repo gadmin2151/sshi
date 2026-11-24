@@ -36,6 +36,7 @@ const UPLOAD: i32 = 3002;
 const DOWNLOAD: i32 = 3003;
 const STATUS: i32 = 3004;
 const PROGRESS: i32 = 3005;
+const HINT: i32 = 3006;
 const LOCAL: i32 = 3100;
 const REMOTE: i32 = 3200;
 const PARENT: i32 = 1;
@@ -203,6 +204,14 @@ impl View {
             &tr_format!("SSHI — Файлы · {}", "SSHI — Files · {}", self.name),
         );
         set_caption(hwnd, TITLE, tr("Передача файлов", "File transfer"));
+        set_caption(
+            hwnd,
+            HINT,
+            tr(
+                "Перетащите файлы в соседнюю панель",
+                "Drag files to the other pane",
+            ),
+        );
         set_caption(hwnd, LOCAL, tr("Этот компьютер", "This computer"));
         set_caption(hwnd, REMOTE, &self.name);
         set_caption(hwnd, UPLOAD, tr("Загрузить →", "Upload →"));
@@ -214,7 +223,9 @@ impl View {
             call(item(hwnd, TITLE), WM_SETFONT, self.heading as usize, 1);
         }
         for side in [LOCAL, REMOTE] {
+            set_caption(hwnd, side + PARENT, tr("Вверх", "Up"));
             set_caption(hwnd, side + GO, tr("Перейти", "Go"));
+            set_caption(hwnd, side + REFRESH, tr("Обнов.", "Refresh"));
             let view = item(hwnd, side + ROWS);
             call(
                 view,
@@ -291,10 +302,10 @@ impl View {
         place(DOWNLOAD, width - 102, 9, 92, 19);
         for (base, x) in [(LOCAL, 10), (REMOTE, 19 + pane_width)] {
             place(base, x, 39, pane_width, height - 86);
-            place(base + PARENT, x + 8, 55, 23, 16);
-            place(base + ADDRESS, x + 35, 55, pane_width - 109, 16);
-            place(base + GO, x + pane_width - 71, 55, 37, 16);
-            place(base + REFRESH, x + pane_width - 29, 55, 21, 16);
+            place(base + PARENT, x + 8, 55, 37, 16);
+            place(base + ADDRESS, x + 49, 55, pane_width - 131, 16);
+            place(base + GO, x + pane_width - 78, 55, 34, 16);
+            place(base + REFRESH, x + pane_width - 40, 55, 32, 16);
             let list = place(base + ROWS, x + 8, 76, pane_width - 16, height - 133);
             call(
                 item(hwnd, base + ROWS),
@@ -386,23 +397,26 @@ impl View {
         };
         let list = item(hwnd, number(side) + ROWS);
         let mut names = Vec::new();
-        let mut index = -1;
+        let mut index = -1_i32;
         loop {
-            index = call(
+            let next = call(
                 list,
                 LVM_GETNEXTITEM,
                 index as usize,
                 LVNI_SELECTED as LPARAM,
-            );
-            if index < 0 {
-                return names;
+            ) as i32;
+            if next <= index {
+                break;
             }
-            if let Some(entry) = listing.entries.get(index as usize)
-                && entry.kind != Kind::Other
-            {
+            let Some(entry) = listing.entries.get(next as usize) else {
+                break;
+            };
+            if entry.kind != Kind::Other {
                 names.push(entry.name.clone());
             }
+            index = next;
         }
+        names
     }
 
     fn request(&mut self, hwnd: HWND, request: Request, status: &str) -> bool {

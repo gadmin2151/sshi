@@ -528,9 +528,7 @@ impl View {
         self.button(hwnd, "Новое", [22, 533, 110, 29], NEW)?;
         self.button(hwnd, "Удалить", [148, 533, 110, 29], DELETE)?;
 
-        let title = self.label(hwnd, "Название подключения", [291, 88, 526, 24])?;
-        let title_font = self.font;
-        unsafe { SendMessageW(title, WM_SETFONT, title_font as usize, 1) };
+        self.label(hwnd, "Название подключения", [291, 88, 526, 24])?;
         self.controls.name = self.edit(hwnd, [291, 127, 328, 30], 0)?;
         self.button(hwnd, "Терминал", [641, 126, 124, 32], CONNECT)?;
         self.button(hwnd, "Файлы", [778, 126, 128, 32], FILES)?;
@@ -1285,7 +1283,14 @@ impl View {
             .env(SESSION_ENV, toml::to_string(&profile)?)
             .spawn()
             .context(tr("Запустить терминал sshi", "Start the SSHI terminal"))?;
-        self.status(tr("Терминал открыт", "Terminal opened"));
+        self.status(if mode == "--files" {
+            tr(
+                "Открыто окно передачи файлов",
+                "File transfer window opened",
+            )
+        } else {
+            tr("Терминал открыт", "Terminal opened")
+        });
         Ok(())
     }
 

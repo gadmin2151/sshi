@@ -38,14 +38,14 @@ def check(binary):
 
     seat = Gdk.Display.get_default().get_default_seat()
 
-    def click(index, edge=None):
+    def click(index, edge=None, button=Gdk.BUTTON_PRIMARY):
         area = clicks.get_child_at_index(index).get_allocation()
         x = area.x + {"left": 1, "right": area.width - 2}.get(edge, area.width // 2)
         y = area.y + area.height // 2
         for event_type in (Gdk.EventType.BUTTON_PRESS, Gdk.EventType.BUTTON_RELEASE):
             event = Gdk.Event.new(event_type)
             event.button.window = clicks.get_window()
-            event.button.button = Gdk.BUTTON_PRIMARY
+            event.button.button = button
             event.button.time = int(time.monotonic() * 1000) % (1 << 32)
             event.button.x, event.button.y = x, y
             event.button.x_root, event.button.y_root = x, y
@@ -125,6 +125,18 @@ def check(binary):
         key(Gdk.KEY_Return)
         assert launches[-1] == ["connect", "Work studio"] and len(launches) == 3
 
+        notes = []
+        window.edit_notes = lambda profile: notes.append(profile["name"])
+        click(0, button=Gdk.BUTTON_SECONDARY)
+        pump(40)
+        assert window.selected_card().profile["name"] == "Atlas"
+        menu = window.actions_button.get_popup()
+        assert menu.get_mapped()
+        notes_action, = [item for item in menu.get_children() if item.get_label() == "Заметки…"]
+        menu.activate_item(notes_action, True)
+        pump(wait)
+        assert notes == ["Atlas"] and len(dialogs) == 2 and len(launches) == 3
+
         # Two nearby clicks across the gap between cards must not activate either.
         pump(wait)
         click(0, "right")
@@ -141,7 +153,7 @@ def check(binary):
         window.search.set_text("work studio")
         pump(wait)
         assert window.selected_card().profile["name"] == "Work studio" and window.dock.get_visible()
-        print("GTK card selection, double-click, delayed rename, keyboard and filtering passed")
+        print("GTK card selection, context menu, double-click, delayed rename, keyboard and filtering passed")
     finally:
         GLib.source_remove(poll)
         window.destroy()

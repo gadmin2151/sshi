@@ -16,7 +16,7 @@ use anyhow::{Context, Result, bail, ensure};
 use iroh::EndpointId;
 use iroh_ssh::{relay_url, update::UpdateInfo};
 use windows_sys::Win32::{
-    Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM},
+    Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
     Graphics::{
         Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute},
         Gdi::{
@@ -44,7 +44,7 @@ use windows_sys::Win32::{
             LVM_SETIMAGELIST, LVM_SETITEMSTATE, LVN_BEGINLABELEDITW, LVN_ENDLABELEDITW,
             LVN_ITEMCHANGED, LVS_AUTOARRANGE, LVS_EDITLABELS, LVS_EX_DOUBLEBUFFER,
             LVS_SHAREIMAGELISTS, LVS_SHOWSELALWAYS, LVS_SINGLESEL, LVSIL_NORMAL, NM_CLICK,
-            NM_CUSTOMDRAW, NM_DBLCLK, NM_KILLFOCUS, NMHDR, NMITEMACTIVATE, NMLISTVIEW,
+            NM_CUSTOMDRAW, NM_DBLCLK, NM_KILLFOCUS, NM_RCLICK, NMHDR, NMITEMACTIVATE, NMLISTVIEW,
             NMLVCUSTOMDRAW, NMLVDISPINFOW,
         },
         Input::KeyboardAndMouse::{
@@ -903,7 +903,7 @@ impl View {
         let command = match id {
             SETTINGS => popup(
                 hwnd,
-                self.controls.settings,
+                MenuAnchor::Button(self.controls.settings),
                 &[
                     (
                         COPY,
@@ -924,28 +924,9 @@ impl View {
                     ),
                 ],
             )?,
-            ACTIONS if self.current().is_some() => popup(
-                hwnd,
-                self.controls.actions,
-                &[
-                    (EDIT, tr("Изменить профиль…", "Edit profile…")),
-                    (RENAME, tr("Переименовать…", "Rename…")),
-                    (NOTES, tr("Заметки…", "Notes…")),
-                    (FORWARD, tr("Пробросить порт…", "Forward a port…")),
-                    (0, ""),
-                    (ENROLL, tr("Ввести приглашение…", "Redeem invitation…")),
-                    (
-                        ISSUE_INVITE,
-                        tr("Создать приглашение…", "Create invitation…"),
-                    ),
-                    (
-                        INSTALL_SSH_KEY,
-                        tr("Установить SSH-ключ…", "Install SSH key…"),
-                    ),
-                    (0, ""),
-                    (DELETE, tr("Удалить подключение…", "Delete connection…")),
-                ],
-            )?,
+            ACTIONS if self.current().is_some() => {
+                profile_menu(hwnd, MenuAnchor::Button(self.controls.actions))?
+            }
             _ => Some(id),
         };
         match command {
@@ -1160,6 +1141,38 @@ impl View {
                     }
                     self.clicked = Some((index, Instant::now()));
                 }
+            }
+            NM_RCLICK => {
+                self.reset_clicks(hwnd);
+                let click = unsafe { &*(param as *const NMITEMACTIVATE) };
+                let Some(index) = self.list_index(click.iItem) else {
+                    return Ok(0);
+                };
+                let list = self.controls.list;
+                let state = LVITEMW {
+                    stateMask: LVIS_SELECTED | LVIS_FOCUSED,
+                    state: LVIS_SELECTED | LVIS_FOCUSED,
+                    ..Default::default()
+                };
+                unsafe {
+                    SetFocus(list);
+                    SendMessageW(
+                        list,
+                        LVM_SETITEMSTATE,
+                        click.iItem as usize,
+                        (&state as *const LVITEMW) as LPARAM,
+                    );
+                }
+                self.selected = Some(index);
+                self.update_selection(hwnd);
+                self.status("");
+                let mut point = POINT::default();
+                if unsafe { GetCursorPos(&mut point) } != 0
+                    && let Some(command) = profile_menu(hwnd, MenuAnchor::Pointer(point))?
+                {
+                    self.command(hwnd, command, 0)?;
+                }
+                return Ok(1);
             }
             NM_KILLFOCUS => self.reset_clicks(hwnd),
             LVN_BEGINLABELEDITW => return Ok(1),
@@ -1628,7 +1641,56 @@ fn read_profile(hwnd: HWND, default: &str) -> Result<Profile> {
     })
 }
 
-fn popup(owner: HWND, button: HWND, entries: &[(u16, &str)]) -> Result<Option<u16>> {
+enum MenuAnchor {
+    Button(HWND),
+    Pointer(POINT),
+}
+
+fn profile_menu(owner: HWND, anchor: MenuAnchor) -> Result<Option<u16>> {
+    popup(
+        owner,
+        anchor,
+        &[
+            (EDIT, tr("Изменить профиль…", "Edit profile…")),
+            (RENAME, tr("Переименовать…", "Rename…")),
+            (NOTES, tr("Заметки…", "Notes…")),
+            (FORWARD, tr("Пробросить порт…", "Forward a port…")),
+            (0, ""),
+            (ENROLL, tr("Ввести приглашение…", "Redeem invitation…")),
+            (
+                ISSUE_INVITE,
+                tr("Создать приглашение…", "Create invitation…"),
+            ),
+            (
+                INSTALL_SSH_KEY,
+                tr("Установить SSH-ключ…", "Install SSH key…"),
+            ),
+            (0, ""),
+            (DELETE, tr("Удалить подключение…", "Delete connection…")),
+        ],
+    )
+}
+
+fn popup(owner: HWND, anchor: MenuAnchor, entries: &[(u16, &str)]) -> Result<Option<u16>> {
+    let (point, alignment) = match anchor {
+        MenuAnchor::Button(button) => {
+            let mut bounds = RECT::default();
+            ensure!(
+                unsafe { GetWindowRect(button, &mut bounds) } != 0,
+                "{}: {}",
+                tr("Найти кнопку меню", "Locate the menu button"),
+                last_error()
+            );
+            (
+                POINT {
+                    x: bounds.right,
+                    y: bounds.bottom,
+                },
+                TPM_RIGHTALIGN,
+            )
+        }
+        MenuAnchor::Pointer(point) => (point, TPM_RIGHTBUTTON),
+    };
     let menu = unsafe { CreatePopupMenu() };
     ensure!(
         !menu.is_null(),
@@ -1653,19 +1715,12 @@ fn popup(owner: HWND, button: HWND, entries: &[(u16, &str)]) -> Result<Option<u1
                 last_error()
             );
         }
-        let mut anchor = RECT::default();
-        ensure!(
-            unsafe { GetWindowRect(button, &mut anchor) } != 0,
-            "{}: {}",
-            tr("Найти кнопку меню", "Locate the menu button"),
-            last_error()
-        );
         let command = unsafe {
             TrackPopupMenu(
                 menu,
-                TPM_RIGHTALIGN | TPM_RETURNCMD | TPM_NONOTIFY,
-                anchor.right,
-                anchor.bottom,
+                alignment | TPM_RETURNCMD | TPM_NONOTIFY,
+                point.x,
+                point.y,
                 0,
                 owner,
                 null(),

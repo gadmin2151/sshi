@@ -292,6 +292,29 @@ private enum WorkspaceTheme {
     }
 }
 
+private struct ProfileAction {
+    let title: String
+    let run: @MainActor () -> Void
+}
+
+@MainActor
+private func profileActions(_ profile: Profile, workspace: Workspace, language: AppLanguage) -> [[ProfileAction]] {
+    [
+        [
+            ProfileAction(title: language("Изменить профиль…", "Edit profile…")) { workspace.show(.edit(profile)) },
+            ProfileAction(title: language("Заметки…", "Notes…")) { workspace.sheet = SheetItem(content: .notes(profile)) },
+            ProfileAction(title: language("SSH-сокет…", "SSH control socket…")) { workspace.sheet = SheetItem(content: .socket(profile)) },
+            ProfileAction(title: language("Пробросить порт…", "Forward a port…")) { workspace.show(.forward(profile)) },
+        ],
+        [
+            ProfileAction(title: language("Ввести приглашение…", "Redeem invitation…")) { workspace.showInvitation(.join(profile)) },
+            ProfileAction(title: language("Создать приглашение…", "Create invitation…")) { workspace.show(.invite(profile)) },
+            ProfileAction(title: language("Установить SSH-ключ…", "Install SSH key…")) { workspace.show(.key(profile)) },
+            ProfileAction(title: language("Токен этого relay…", "Relay token…")) { workspace.show(.token(profile)) },
+        ],
+    ]
+}
+
 @MainActor
 private struct ProfileDock: View {
     @ObservedObject var workspace: Workspace
@@ -357,19 +380,15 @@ private struct ProfileDock: View {
     }
 
     private var actions: some View {
-        HStack(spacing: 8) {
+        let sections = profileActions(profile, workspace: workspace, language: language)
+        return HStack(spacing: 8) {
             Menu(language("Действия", "Actions")) {
-                Button(language("Изменить профиль…", "Edit profile…")) { workspace.show(.edit(profile)) }
-                Button(language("Заметки…", "Notes…")) { workspace.sheet = SheetItem(content: .notes(profile)) }
-                Button(language("SSH-сокет…", "SSH control socket…")) { workspace.sheet = SheetItem(content: .socket(profile)) }
-                Button(language("Пробросить порт…", "Forward a port…")) { workspace.show(.forward(profile)) }
-                Divider()
-                Button(language("Ввести приглашение…", "Redeem invitation…")) {
-                    workspace.showInvitation(.join(profile))
+                ForEach(sections.indices, id: \.self) { index in
+                    if index > 0 { Divider() }
+                    ForEach(sections[index], id: \.title) { action in
+                        Button(action.title) { action.run() }
+                    }
                 }
-                Button(language("Создать приглашение…", "Create invitation…")) { workspace.show(.invite(profile)) }
-                Button(language("Установить SSH-ключ…", "Install SSH key…")) { workspace.show(.key(profile)) }
-                Button(language("Токен этого relay…", "Relay token…")) { workspace.show(.token(profile)) }
             }
             Button {
                 workspace.sheet = SheetItem(content: .files(profile))
@@ -546,6 +565,7 @@ final class ProfileGrid: NSCollectionView, NSTextFieldDelegate {
     private let openProfile: (String) -> Void
     private let provider = CollectionProvider()
     private var profiles: [Profile] = []
+    private var language = AppLanguage.russian
     private var syncing = false
     private var lastClicked: String?
     private var pressedCard: CardPress?
@@ -575,6 +595,7 @@ final class ProfileGrid: NSCollectionView, NSTextFieldDelegate {
     var selectedIndex: Int? { selectionIndexPaths.first?.item }
 
     func update(_ profiles: [Profile], selected: String?, language: AppLanguage = .current()) {
+        self.language = language
         setAccessibilityLabel(language("Подключения", "Connections"))
         syncing = true
         defer { syncing = false }
@@ -635,6 +656,31 @@ final class ProfileGrid: NSCollectionView, NSTextFieldDelegate {
             }
         }
         return nil
+    }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        resetClicks()
+        guard editingName == nil, let path = cardPath(atWindowPoint: event.locationInWindow),
+              profiles.indices.contains(path.item) else { return nil }
+        let profile = profiles[path.item]
+        window?.makeFirstResponder(self)
+        selectionIndexPaths = [path]
+        workspace.selected = profile.name
+
+        let menu = NSMenu()
+        for section in profileActions(profile, workspace: workspace, language: language) {
+            if menu.numberOfItems > 0 { menu.addItem(.separator()) }
+            for action in section {
+                let item = menu.addItem(withTitle: action.title, action: #selector(runProfileAction(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = action
+            }
+        }
+        return menu
+    }
+
+    @objc private func runProfileAction(_ item: NSMenuItem) {
+        (item.representedObject as? ProfileAction)?.run()
     }
 
     override func mouseDown(with event: NSEvent) {

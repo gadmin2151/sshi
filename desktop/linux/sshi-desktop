@@ -1657,6 +1657,7 @@ class Window(Gtk.Window):
         self.card_clicks.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
         self.card_clicks.connect("pressed", self.card_pressed)
         self.card_clicks.connect("released", self.card_released)
+        self.cards.connect("button-press-event", self.card_context_menu)
         self.cards.connect("selected-children-changed", self.card_selected)
         self.cards.connect("child-activated", self.card_activated)
         scroll.connect("scroll-event", self.reset_clicks)
@@ -1752,6 +1753,18 @@ class Window(Gtk.Window):
     def focus_changed(self, _, widget):
         if widget != self.clicked_card:
             self.reset_clicks()
+
+    def card_context_menu(self, _, event):
+        if event.button != Gdk.BUTTON_SECONDARY:
+            return False
+        self.reset_clicks()
+        card = self.cards.get_child_at_pos(int(event.x), int(event.y))
+        if card is None:
+            return False
+        self.cards.select_child(card)
+        card.grab_focus()
+        self.actions_button.get_popup().popup_at_pointer(event)
+        return True
 
     def card_pressed(self, _, count, x, y):
         self.cancel_rename()

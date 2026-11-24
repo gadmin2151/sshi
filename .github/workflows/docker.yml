@@ -1,0 +1,37 @@
+name: Build Docker images
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {arch: amd64, runner: ubuntu-24.04}
+          - {arch: arm64, runner: ubuntu-24.04-arm}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Build and test the SSHI image
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="sshi-iroh:${GITHUB_SHA:0:12}-${{ matrix.arch }}"
+          docker buildx build --platform linux/${{ matrix.arch }} --load --tag "$image" .
+          endpoint=$(docker run --rm --network none "$image" keygen --key /keys/test.key)
+          [[ "$endpoint" =~ ^[0-9a-f]{64}$ ]]
+          mkdir -p dist
+          docker save "$image" | gzip -1 > "dist/sshi-docker-${{ matrix.arch }}.tar.gz"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sshi-docker-${{ matrix.arch }}
+          path: dist/sshi-docker-${{ matrix.arch }}.tar.gz
+          compression-level: 0
+          if-no-files-found: error

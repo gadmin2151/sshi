@@ -122,6 +122,7 @@ struct SheetItem: Identifiable {
         case invitation(InvitationStart)
         case files(Profile)
         case notes(Profile)
+        case socket(Profile)
     }
     let content: Content
 }
@@ -169,10 +170,11 @@ final class Workspace: ObservableObject {
     }
 
     var visible: [Profile] {
-        guard !query.isEmpty else { return profiles }
+        let search = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !search.isEmpty else { return profiles }
         return profiles.filter {
-            $0.name.localizedCaseInsensitiveContains(query) ||
-                $0.destination.localizedCaseInsensitiveContains(query)
+            $0.name.localizedCaseInsensitiveContains(search) ||
+                $0.destination.localizedCaseInsensitiveContains(search)
         }
     }
 
@@ -262,80 +264,124 @@ final class Workspace: ObservableObject {
 }
 
 @MainActor
-struct ProfileDetail: View {
+private enum WorkspaceTheme {
+    static let canvas = color(0x0e1627)
+    static let surface = color(0x151f33)
+    static let selected = color(0x182a49)
+    static let border = color(0x354964)
+    static let selectedBorder = color(0x5592ff)
+    static let primary = color(0x225fdf)
+    static let text = color(0xf0f4ff)
+    static let muted = color(0xa9b9d4)
+    private static let badges = [
+        ("desktopcomputer", color(0x225eb1)), ("server.rack", color(0x9a5707)),
+        ("cpu", color(0xbd2755)), ("network", color(0x087d77)),
+        ("terminal", color(0x6943bc)), ("externaldrive", color(0x326f9e))
+    ]
+
+    static func badge(_ profile: Profile) -> (symbol: String, color: NSColor) {
+        let index = profile.name.utf8.enumerated().reduce(0) { sum, entry in
+            (sum + (entry.offset + 1) * Int(entry.element)) % badges.count
+        }
+        return badges[index]
+    }
+
+    private static func color(_ rgb: UInt32) -> NSColor {
+        NSColor(srgbRed: CGFloat((rgb >> 16) & 255) / 255, green: CGFloat((rgb >> 8) & 255) / 255,
+                blue: CGFloat(rgb & 255) / 255, alpha: 1)
+    }
+}
+
+@MainActor
+private struct ProfileDock: View {
     @ObservedObject var workspace: Workspace
     let profile: Profile
     let language: AppLanguage
+    let stacked: Bool
+
+    var body: some View {
+        Group {
+            if stacked {
+                VStack(alignment: .trailing, spacing: 12) {
+                    details
+                    actions
+                }
+            } else {
+                HStack(spacing: 14) {
+                    details
+                    actions
+                }
+            }
+        }
+        .padding(12)
+        .background(Color(nsColor: WorkspaceTheme.surface), in: RoundedRectangle(cornerRadius: 11))
+        .overlay(RoundedRectangle(cornerRadius: 11).strokeBorder(Color(nsColor: WorkspaceTheme.border))
+            .allowsHitTesting(false))
+    }
+
+    private var details: some View {
+        let badge = WorkspaceTheme.badge(profile)
+        let endpoint = String(profile.endpoint.prefix(8)) + "…" + String(profile.endpoint.suffix(7))
+        let relay = profile.relay.isEmpty ? language("Из настроек SSHI", "From SSHI settings") : profile.relay
+        return HStack(spacing: 10) {
+            Image(systemName: badge.symbol).font(.system(size: 20, weight: .medium))
+                .foregroundColor(.white).frame(width: 39, height: 39)
+                .background(Color(nsColor: badge.color), in: RoundedRectangle(cornerRadius: 9))
+                .accessibilityHidden(true)
+            Text(verbatim: profile.name).font(.system(size: 16, weight: .semibold))
+                .lineLimit(1).help(profile.name)
+            Divider().frame(height: 34)
+            field("Endpoint ID", endpoint).help(profile.endpoint)
+            Button {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(profile.endpoint, forType: .string)
+            } label: {
+                Image(systemName: "doc.on.doc")
+            }
+            .help(language("Скопировать Endpoint ID", "Copy Endpoint ID"))
+            .accessibilityLabel(language("Скопировать Endpoint ID", "Copy Endpoint ID"))
+            Divider().frame(height: 34)
+            field("Relay", relay).help(relay)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
 
     private func field(_ title: String, _ value: String) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(title).font(.subheadline).foregroundColor(.secondary)
-            Text(value).font(.system(.body, design: .monospaced)).textSelection(.enabled)
+            Text(title).font(.caption).foregroundColor(Color(nsColor: WorkspaceTheme.muted))
+            Text(verbatim: value).font(.system(size: 12, design: .monospaced))
         }
+        .lineLimit(1)
+        .truncationMode(.middle)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 19) {
-                HStack(spacing: 14) {
-                    Image(systemName: "server.rack").font(.system(size: 23, weight: .semibold))
-                        .foregroundColor(.white).frame(width: 47, height: 47)
-                        .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 12))
-                    Text(profile.name).font(.largeTitle.bold()).textSelection(.enabled)
-                    Spacer(minLength: 0)
-                }.padding(16).frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color.accentColor.opacity(0.10), in: RoundedRectangle(cornerRadius: 15))
-                HStack(spacing: 12) {
-                    Button {
-                        workspace.launch(["connect", profile.name], hold: false)
-                    } label: { Label(language("Открыть терминал", "Open terminal"), systemImage: "terminal") }
-                        .buttonStyle(.borderedProminent).controlSize(.large)
-                    Button {
-                        workspace.sheet = SheetItem(content: .files(profile))
-                    } label: { Label(language("Файлы", "Files"), systemImage: "folder") }
-                    .buttonStyle(.bordered)
-                    Button(language("Изменить", "Edit")) { workspace.show(.edit(profile)) }
-                }
-                VStack(alignment: .leading, spacing: 11) {
-                    field(language("Пользователь SSH", "SSH user"), profile.user)
-                    field("Endpoint ID", profile.endpoint)
-                    field("Relay", profile.relay.isEmpty ? language("Из настроек SSHI", "From SSHI settings") : profile.relay)
-                }.padding(15).frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color(nsColor: .quaternaryLabelColor).opacity(0.36), in: RoundedRectangle(cornerRadius: 10))
-                SocketControls(workspace: workspace, profile: profile, language: language).id(profile.socketKey)
-                notesCard
-                Text(language("Инструменты подключения", "Connection tools")).font(.headline)
+    private var actions: some View {
+        HStack(spacing: 8) {
+            Menu(language("Действия", "Actions")) {
+                Button(language("Изменить профиль…", "Edit profile…")) { workspace.show(.edit(profile)) }
+                Button(language("Заметки…", "Notes…")) { workspace.sheet = SheetItem(content: .notes(profile)) }
+                Button(language("SSH-сокет…", "SSH control socket…")) { workspace.sheet = SheetItem(content: .socket(profile)) }
+                Button(language("Пробросить порт…", "Forward a port…")) { workspace.show(.forward(profile)) }
                 Divider()
-                HStack(spacing: 16) {
-                    Menu(language("Доступ", "Access")) {
-                        Button(language("Токен этого relay…", "Relay token…")) { workspace.show(.token(profile)) }
-                        Button(language("Ввести приглашение…", "Redeem invitation…")) {
-                            workspace.showInvitation(.join(profile))
-                        }
-                        Button(language("Создать приглашение…", "Create invitation…")) { workspace.show(.invite(profile)) }
-                        Button(language("Установить SSH-ключ…", "Install SSH key…")) { workspace.show(.key(profile)) }
-                    }.fixedSize()
-                    Button(language("Пробросить порт…", "Forward a port…")) { workspace.show(.forward(profile)) }
+                Button(language("Ввести приглашение…", "Redeem invitation…")) {
+                    workspace.showInvitation(.join(profile))
                 }
-            }.padding(30).frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-
-    private var notesCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text(language("Заметки", "Notes")).font(.headline)
-                Spacer()
-                Button(profile.notes?.isEmpty == false ? language("Изменить…", "Edit…") : language("Добавить…", "Add…")) {
-                    workspace.sheet = SheetItem(content: .notes(profile))
-                }
+                Button(language("Создать приглашение…", "Create invitation…")) { workspace.show(.invite(profile)) }
+                Button(language("Установить SSH-ключ…", "Install SSH key…")) { workspace.show(.key(profile)) }
+                Button(language("Токен этого relay…", "Relay token…")) { workspace.show(.token(profile)) }
             }
-            if let notes = profile.notes, !notes.isEmpty {
-                Text(verbatim: notes).lineLimit(3).textSelection(.enabled)
-            }
+            Button {
+                workspace.sheet = SheetItem(content: .files(profile))
+            } label: { Label(language("Файлы", "Files"), systemImage: "folder") }
+                .buttonStyle(.bordered)
+            Button {
+                workspace.launch(["connect", profile.name], hold: false)
+            } label: { Label(language("Открыть терминал", "Open terminal"), systemImage: "arrow.up.right.square") }
+                .buttonStyle(.borderedProminent)
         }
-        .padding(14).frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+        .fixedSize()
+        .controlSize(.large)
     }
 }
 
@@ -385,45 +431,85 @@ private struct ProfileNotesSheet: View {
     }
 }
 
-private final class ProfileCell: NSTableCellView {
+@MainActor
+private final class ProfileCard: NSCollectionViewItem {
     let name = NSTextField(labelWithString: "")
-    let address = NSTextField(labelWithString: "")
+    private let address = NSTextField(labelWithString: "")
+    private let badge = NSImageView()
 
-    init() {
-        super.init(frame: .zero)
-        name.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
+    override func loadView() {
+        view = NSView()
+        view.wantsLayer = true
+        view.layer?.cornerRadius = 12
+        badge.wantsLayer = true
+        badge.layer?.cornerRadius = 9
+        badge.contentTintColor = .white
+        badge.imageScaling = .scaleNone
+        badge.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(badge)
+        name.font = .systemFont(ofSize: 17, weight: .semibold)
+        name.textColor = WorkspaceTheme.text
         name.lineBreakMode = .byTruncatingTail
-        address.font = .monospacedSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
-        address.textColor = .secondaryLabelColor
+        address.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        address.textColor = WorkspaceTheme.muted
         address.lineBreakMode = .byTruncatingTail
-        textField = name
+        for field in [name, address] {
+            field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        }
         let stack = NSStackView(views: [name, address])
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 3
+        stack.spacing = 5
         stack.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(stack)
+        view.addSubview(stack)
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
-            stack.centerYAnchor.constraint(equalTo: centerYAnchor),
+            badge.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 13),
+            badge.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            badge.widthAnchor.constraint(equalToConstant: 46),
+            badge.heightAnchor.constraint(equalTo: badge.widthAnchor),
+            stack.leadingAnchor.constraint(equalTo: badge.trailingAnchor, constant: 12),
+            stack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -13),
+            stack.centerYAnchor.constraint(equalTo: view.centerYAnchor),
             name.widthAnchor.constraint(equalTo: stack.widthAnchor),
             address.widthAnchor.constraint(equalTo: stack.widthAnchor)
         ])
+        updateSelection()
     }
 
-    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+    override var isSelected: Bool {
+        didSet { if isViewLoaded { updateSelection() } }
+    }
+
+    func configure(_ profile: Profile, delegate: NSTextFieldDelegate) {
+        let style = WorkspaceTheme.badge(profile)
+        let symbol = NSImage(systemSymbolName: style.symbol, accessibilityDescription: nil)
+        badge.image = symbol?.withSymbolConfiguration(.init(pointSize: 23, weight: .medium))
+        badge.layer?.backgroundColor = style.color.cgColor
+        name.stringValue = profile.name
+        name.delegate = delegate
+        name.isEditable = false
+        name.isSelectable = false
+        address.stringValue = profile.user + " · " + String(profile.endpoint.prefix(8)) + "…"
+        view.toolTip = profile.name + "\n" + profile.destination
+        view.setAccessibilityLabel(profile.name)
+    }
+
+    private func updateSelection() {
+        view.layer?.backgroundColor = (isSelected ? WorkspaceTheme.selected : WorkspaceTheme.surface).cgColor
+        view.layer?.borderColor = (isSelected ? WorkspaceTheme.selectedBorder : WorkspaceTheme.border).cgColor
+        view.layer?.borderWidth = isSelected ? 2 : 1
+    }
 }
 
 @MainActor
-final class ProfileTable: NSTableView, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate {
+final class ProfileGrid: NSCollectionView, NSCollectionViewDataSource, NSCollectionViewDelegateFlowLayout, NSTextFieldDelegate {
+    private static let cardID = NSUserInterfaceItemIdentifier("profileCard")
     private let workspace: Workspace
     private let openProfile: (String) -> Void
     private var profiles: [Profile] = []
     private var syncing = false
     private var lastClicked: String?
     private var previousMouseDown: String?
-    private var doubleClickName: String?
     private var renameTimer: Timer?
     private var editingName: String?
 
@@ -431,69 +517,74 @@ final class ProfileTable: NSTableView, NSTableViewDataSource, NSTableViewDelegat
         self.workspace = workspace
         self.openProfile = openProfile
         super.init(frame: .zero)
-        headerView = nil
-        style = .sourceList
-        rowHeight = 45
+        let flow = NSCollectionViewFlowLayout()
+        flow.minimumInteritemSpacing = 12
+        flow.minimumLineSpacing = 12
+        collectionViewLayout = flow
+        backgroundColors = [WorkspaceTheme.canvas]
+        isSelectable = true
         allowsMultipleSelection = false
         allowsEmptySelection = false
-        columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
-        let column = NSTableColumn(identifier: .init("profile"))
-        column.title = tr("Подключения", "Connections")
-        addTableColumn(column)
+        register(ProfileCard.self, forItemWithIdentifier: Self.cardID)
         delegate = self
         dataSource = self
-        target = self
-        action = #selector(singleClick(_:))
-        doubleAction = #selector(doubleClick(_:))
-        setAccessibilityLabel(column.title)
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
 
+    var selectedIndex: Int? { selectionIndexPaths.first?.item }
+
     func update(_ profiles: [Profile], selected: String?, language: AppLanguage = .current()) {
-        let title = language("Подключения", "Connections")
-        if tableColumns.first?.title != title {
-            tableColumns.first?.title = title
-            setAccessibilityLabel(title)
-        }
+        setAccessibilityLabel(language("Подключения", "Connections"))
         syncing = true
         defer { syncing = false }
         if self.profiles != profiles {
             resetClicks()
+            selectionIndexPaths = []
             self.profiles = profiles
             reloadData()
         }
-        let row = profiles.firstIndex { $0.name == selected }
-        if selectedRow != (row ?? -1) {
+        let index = profiles.firstIndex { $0.name == selected }
+        if selectedIndex != index {
             resetClicks()
-            selectRowIndexes(row.map { IndexSet(integer: $0) } ?? [], byExtendingSelection: false)
-            if let row = row { scrollRowToVisible(row) }
+            let path = index.map { IndexPath(item: $0, section: 0) }
+            selectionIndexPaths = path.map { Set([$0]) } ?? []
+            if let path = path,
+               let frame = collectionViewLayout?.layoutAttributesForItem(at: path)?.frame {
+                scrollToVisible(frame)
+            }
         }
     }
 
-    func numberOfRows(in tableView: NSTableView) -> Int { profiles.count }
-
-    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        let cell = makeView(withIdentifier: .init("profileCell"), owner: self) as? ProfileCell ?? ProfileCell()
-        cell.identifier = .init("profileCell")
-        let profile = profiles[row]
-        cell.name.stringValue = profile.name
-        cell.name.delegate = self
-        cell.name.isEditable = false
-        cell.name.isSelectable = false
-        cell.address.stringValue = profile.user + "@" + String(profile.endpoint.prefix(10)) + "…"
-        return cell
+    func collectionView(_ collectionView: NSCollectionView, numberOfItemsInSection section: Int) -> Int {
+        profiles.count
     }
 
-    func tableViewSelectionDidChange(_ notification: Notification) {
-        guard !syncing else { return }
-        let name = profiles.indices.contains(selectedRow) ? profiles[selectedRow].name : nil
+    func collectionView(_ collectionView: NSCollectionView, itemForRepresentedObjectAt indexPath: IndexPath) -> NSCollectionViewItem {
+        let card = makeItem(withIdentifier: Self.cardID, for: indexPath) as! ProfileCard
+        _ = card.view
+        card.configure(profiles[indexPath.item], delegate: self)
+        return card
+    }
+
+    func collectionView(_ collectionView: NSCollectionView, layout collectionViewLayout: NSCollectionViewLayout,
+                        sizeForItemAt indexPath: IndexPath) -> NSSize {
+        let width = max(bounds.width, 1)
+        let columns = CGFloat(max(1, min(3, Int((width + 12) / 242))))
+        return NSSize(width: floor((width - 12 * (columns - 1)) / columns), height: 108)
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        let widthChanged = newSize.width != frame.width
+        super.setFrameSize(newSize)
+        if widthChanged { collectionViewLayout?.invalidateLayout() }
+    }
+
+    func collectionView(_ collectionView: NSCollectionView, didSelectItemsAt indexPaths: Set<IndexPath>) {
+        guard !syncing, let index = indexPaths.first?.item, profiles.indices.contains(index) else { return }
+        let name = profiles[index].name
         if name != lastClicked { resetClicks() }
         workspace.selected = name
-    }
-
-    func tableView(_ tableView: NSTableView, typeSelectStringFor tableColumn: NSTableColumn?, row: Int) -> String? {
-        profiles[row].name
     }
 
     private func resetClicks() {
@@ -502,16 +593,36 @@ final class ProfileTable: NSTableView, NSTableViewDataSource, NSTableViewDelegat
         lastClicked = nil
     }
 
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard let target = super.hitTest(point) else { return nil }
+        // The collection handles selection across the card. The field handles inline edits.
+        return editingName == nil ? self : target
+    }
+
     override func mouseDown(with event: NSEvent) {
-        // A second mouse-down can arrive while AppKit is still tracking its mouse-up.
         renameTimer?.invalidate()
-        let row = row(at: convert(event.locationInWindow, from: nil))
-        let name = profiles.indices.contains(row) ? profiles[row].name : nil
-        // WindowServer counts clicks by location. Adjacent rows can share the double-click slop.
-        doubleClickName = event.clickCount == 2 && name == previousMouseDown ? name : nil
+        let path = indexPathForItem(at: convert(event.locationInWindow, from: nil))
+        let name = path.flatMap { profiles.indices.contains($0.item) ? profiles[$0.item].name : nil }
+        let repeated = name != nil && name == lastClicked
+        let sameCard = name == previousMouseDown
         previousMouseDown = name
-        if row != selectedRow { resetClicks() }
         super.mouseDown(with: event)
+        guard let name = name, path?.item == selectedIndex, editingName == nil else {
+            resetClicks()
+            return
+        }
+        if event.clickCount == 2 {
+            resetClicks()
+            // The window server counts nearby clicks across card boundaries.
+            if sameCard && repeated { openProfile(name) }
+        } else if event.clickCount == 1 {
+            if repeated {
+                renameTimer = Timer.scheduledTimer(timeInterval: NSEvent.doubleClickInterval,
+                                                    target: self, selector: #selector(startRename(_:)),
+                                                    userInfo: nil, repeats: false)
+            }
+            lastClicked = name
+        }
     }
 
     override func resignFirstResponder() -> Bool {
@@ -519,33 +630,19 @@ final class ProfileTable: NSTableView, NSTableViewDataSource, NSTableViewDelegat
         return super.resignFirstResponder()
     }
 
-    @objc private func singleClick(_ sender: NSTableView) {
-        guard clickedRow == selectedRow, profiles.indices.contains(clickedRow), editingName == nil else { return }
-        let name = profiles[clickedRow].name
-        if lastClicked == name {
-            renameTimer?.invalidate()
-            renameTimer = Timer.scheduledTimer(timeInterval: NSEvent.doubleClickInterval,
-                                                target: self, selector: #selector(startRename(_:)),
-                                                userInfo: nil, repeats: false)
-        }
-        lastClicked = name
-    }
-
-    @objc private func doubleClick(_ sender: NSTableView) {
-        resetClicks()
-        guard profiles.indices.contains(clickedRow), clickedRow == selectedRow,
-              profiles[clickedRow].name == doubleClickName else { return }
-        openProfile(profiles[clickedRow].name)
-    }
-
     @objc private func startRename(_ timer: Timer) {
         guard window?.isKeyWindow == true, window?.attachedSheet == nil, window?.firstResponder === self,
-              profiles.indices.contains(selectedRow), lastClicked == profiles[selectedRow].name,
-              let cell = view(atColumn: 0, row: selectedRow, makeIfNecessary: false) as? ProfileCell else { return }
-        editingName = profiles[selectedRow].name
+              let index = selectedIndex, profiles.indices.contains(index), lastClicked == profiles[index].name
+        else { return }
+        beginRename(index)
+    }
+
+    private func beginRename(_ index: Int) {
+        guard let card = item(at: IndexPath(item: index, section: 0)) as? ProfileCard else { return }
+        editingName = profiles[index].name
         resetClicks()
-        cell.name.isEditable = true
-        cell.name.selectText(nil)
+        card.name.isEditable = true
+        card.name.selectText(nil)
     }
 
     func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
@@ -575,16 +672,23 @@ final class ProfileTable: NSTableView, NSTableViewDataSource, NSTableViewDelegat
 
     override func keyDown(with event: NSEvent) {
         resetClicks()
-        if (event.keyCode == 36 || event.keyCode == 76) && profiles.indices.contains(selectedRow) {
-            openProfile(profiles[selectedRow].name)
-        } else {
-            super.keyDown(with: event)
+        if let index = selectedIndex, profiles.indices.contains(index) {
+            switch event.keyCode {
+            case 36, 76:
+                openProfile(profiles[index].name)
+                return
+            case 120:  // F2
+                beginRename(index)
+                return
+            default: break
+            }
         }
+        super.keyDown(with: event)
     }
 }
 
 @MainActor
-private struct ProfileSidebar: NSViewRepresentable {
+private struct ProfileGallery: NSViewRepresentable {
     @ObservedObject var workspace: Workspace
     let language: AppLanguage
 
@@ -592,15 +696,16 @@ private struct ProfileSidebar: NSViewRepresentable {
         let scroll = NSScrollView()
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
-        let table = ProfileTable(workspace) { workspace.launch(["connect", $0], hold: false) }
-        table.frame = scroll.contentView.bounds
-        table.autoresizingMask = [.width]
-        scroll.documentView = table
+        scroll.drawsBackground = false
+        let grid = ProfileGrid(workspace) { workspace.launch(["connect", $0], hold: false) }
+        grid.frame = scroll.contentView.bounds
+        grid.autoresizingMask = [.width]
+        scroll.documentView = grid
         return scroll
     }
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
-        (scroll.documentView as? ProfileTable)?.update(workspace.visible, selected: workspace.selected, language: language)
+        (scroll.documentView as? ProfileGrid)?.update(workspace.visible, selected: workspace.selected, language: language)
     }
 }
 
@@ -610,30 +715,41 @@ struct WorkspaceView: View {
     @AppStorage(AppLanguage.preferenceKey) private var language: AppLanguage = .russian
 
     var body: some View {
-        HSplitView {
-            VStack(alignment: .leading, spacing: 0) {
-                TextField(language("Поиск подключений", "Search connections"), text: $workspace.query)
-                    .textFieldStyle(.roundedBorder).padding(12)
-                ProfileSidebar(workspace: workspace, language: language)
-            }.frame(minWidth: 185, idealWidth: 225, maxWidth: 350)
-            Group {
-                if let profile = workspace.current {
-                    ProfileDetail(workspace: workspace, profile: profile, language: language)
-                } else {
-                    VStack(spacing: 14) {
-                        Image(systemName: "terminal").font(.largeTitle).foregroundColor(.accentColor)
-                        Text(workspace.query.isEmpty ? language("Подключения", "Connections") : language("Ничего не найдено", "No matches")).font(.title.bold())
-                        if workspace.query.isEmpty {
-                            Text(language("Подключитесь по приглашению или укажите адрес компьютера вручную.", "Connect with an invitation or enter a computer’s address manually."))
-                                .foregroundColor(.secondary).multilineTextAlignment(.center)
-                            Button(language("Новое подключение", "New connection")) { workspace.showInvitation(.join(nil)) }
-                                .buttonStyle(.borderedProminent)
-                            Button(language("Пригласить на этот Mac…", "Invite to this Mac…")) { workspace.showInvitation(.host) }
-                        }
-                    }.padding(40).frame(maxWidth: .infinity, maxHeight: .infinity)
+        GeometryReader { area in
+            VStack(alignment: .leading, spacing: 17) {
+                HStack {
+                    Text(language("Подключения", "Connections")).font(.system(size: 36, weight: .bold))
+                    Spacer()
+                    Button {
+                        workspace.showInvitation(.join(nil))
+                    } label: { Label(language("Новое подключение", "New connection"), systemImage: "plus") }
+                        .keyboardShortcut("n").buttonStyle(.borderedProminent).controlSize(.large)
                 }
-            }.frame(minWidth: 420, idealWidth: 535)
-        }.frame(minHeight: 500)
+                search
+                if !workspace.visible.isEmpty {
+                    ProfileGallery(workspace: workspace, language: language)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    Text(workspace.profiles.isEmpty
+                         ? language("Добавьте подключение по приглашению или укажите Endpoint ID компьютера.",
+                                    "Use an invitation or enter the computer’s Endpoint ID to add a connection.")
+                         : language("По вашему запросу ничего не найдено.", "No matching connections."))
+                        .foregroundColor(Color(nsColor: WorkspaceTheme.muted))
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+                if let profile = workspace.current {
+                    ProfileDock(workspace: workspace, profile: profile, language: language, stacked: area.size.width < 1015)
+                }
+            }
+            .padding(26)
+            .frame(width: area.size.width, height: area.size.height)
+        }
+        .background(Color(nsColor: WorkspaceTheme.canvas))
+        .foregroundColor(Color(nsColor: WorkspaceTheme.text))
+        .tint(Color(nsColor: WorkspaceTheme.primary))
+        .preferredColorScheme(.dark)
+        .frame(minWidth: 575, idealWidth: 1180, minHeight: 440, idealHeight: 700)
         .environment(\.locale, Locale(identifier: language.rawValue))
         .onAppear {
             if CommandLine.arguments.contains("--smoke-test") {
@@ -670,8 +786,6 @@ struct WorkspaceView: View {
                         workspace.offerUpdate(language)
                     }
                 }
-                Button { workspace.showInvitation(.join(nil)) } label: { Label(language("Новое подключение", "New connection"), systemImage: "plus") }
-                    .keyboardShortcut("n").help(language("Новое подключение", "New connection"))
                 Button { workspace.show(.settings) } label: { Label(language("Настройки", "Settings"), systemImage: "gearshape") }
                     .keyboardShortcut(",", modifiers: .command).help(language("Настройки", "Settings"))
                 Menu {
@@ -692,11 +806,32 @@ struct WorkspaceView: View {
             case .invitation(let start): InvitationSheet(workspace: workspace, start: start)
             case .files(let profile): FileBrowser(profile: profile, language: language)
             case .notes(let profile): ProfileNotesSheet(workspace: workspace, profile: profile, language: language)
+            case .socket(let profile):
+                VStack(alignment: .leading, spacing: 14) {
+                    Text(verbatim: profile.name).font(.headline)
+                    SocketControls(workspace: workspace, profile: profile, language: language).id(profile.socketKey)
+                    Button(language("Закрыть", "Close")) { workspace.sheet = nil }
+                        .keyboardShortcut(.cancelAction).frame(maxWidth: .infinity, alignment: .trailing)
+                }
+                .padding(18).frame(width: 620)
             }
         }
         .alert("SSHI", isPresented: Binding(get: { workspace.feedback != nil }, set: { if !$0 { workspace.feedback = nil } })) {
             Button("OK") { workspace.feedback = nil }
         } message: { Text(workspace.feedback ?? "") }
+    }
+
+    private var search: some View {
+        let caption = language("Поиск подключений", "Search connections")
+        return HStack(spacing: 9) {
+            Image(systemName: "magnifyingglass")
+                .foregroundColor(Color(nsColor: WorkspaceTheme.muted)).accessibilityHidden(true)
+            TextField(caption, text: $workspace.query).textFieldStyle(.plain)
+        }
+        .padding(11)
+        .background(Color(nsColor: WorkspaceTheme.surface), in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color(nsColor: WorkspaceTheme.border))
+            .allowsHitTesting(false))
     }
 }
 
@@ -907,7 +1042,7 @@ struct Editor: View {
 struct SSHIDesktop: App {
     var body: some Scene {
         WindowGroup("SSHI") {
-            WorkspaceView().accentColor(Color(red: 0.04, green: 0.48, blue: 0.44))
+            WorkspaceView()
         }.commands { CommandGroup(replacing: .newItem) {} }
     }
 }

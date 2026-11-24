@@ -9,6 +9,7 @@ use std::{
     ptr::{null, null_mut},
     sync::mpsc::{self, Receiver, TryRecvError},
     thread,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail, ensure};
@@ -16,26 +17,39 @@ use iroh::EndpointId;
 use iroh_ssh::{relay_url, update::UpdateInfo};
 use windows_sys::Win32::{
     Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM},
-    Graphics::Gdi::{
-        BeginPaint, COLOR_WINDOW, CreateFontW, CreateSolidBrush, DeleteObject, EndPaint, FillRect,
-        HFONT, PAINTSTRUCT, SetBkColor, SetTextColor,
+    Graphics::{
+        Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute},
+        Gdi::{
+            BeginPaint, EndPaint, FillRect, InvalidateRect, PAINTSTRUCT, SetBkColor, SetTextColor,
+        },
     },
-    System::LibraryLoader::GetModuleHandleW,
+    System::{
+        LibraryLoader::GetModuleHandleW,
+        SystemServices::{SS_CENTER, SS_ENDELLIPSIS, SS_NOPREFIX},
+    },
     UI::{
         Controls::{
+            CDDS_ITEMPREPAINT, CDDS_PREPAINT, CDRF_DODEFAULT, CDRF_NOTIFYITEMDRAW,
+            CDRF_SKIPDEFAULT, DRAWITEMSTRUCT,
             Dialogs::{
                 CommDlgExtendedError, GetOpenFileNameW, GetSaveFileNameW, OFN_FILEMUSTEXIST,
                 OFN_NOCHANGEDIR, OFN_PATHMUSTEXIST, OPENFILENAMEW,
             },
-            EM_LIMITTEXT, EM_SETCUEBANNER, EM_SETSEL, ICC_LISTVIEW_CLASSES, INITCOMMONCONTROLSEX,
-            InitCommonControlsEx, LVCF_WIDTH, LVCOLUMNW, LVIF_TEXT, LVIS_FOCUSED, LVIS_SELECTED,
-            LVITEMW, LVM_DELETEALLITEMS, LVM_EDITLABELW, LVM_GETEDITCONTROL, LVM_GETNEXTITEM,
-            LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMSTATE,
-            LVN_BEGINLABELEDITW, LVN_ENDLABELEDITW, LVN_ITEMCHANGED, LVNI_SELECTED, LVS_EDITLABELS,
-            LVS_EX_FULLROWSELECT, LVS_NOCOLUMNHEADER, LVS_REPORT, LVS_SHOWSELALWAYS, LVS_SINGLESEL,
-            NM_CLICK, NM_DBLCLK, NM_KILLFOCUS, NMHDR, NMITEMACTIVATE, NMLISTVIEW, NMLVDISPINFOW,
+            EM_LIMITTEXT, EM_SETCUEBANNER, EM_SETSEL, HIMAGELIST, ICC_LISTVIEW_CLASSES,
+            ILC_COLOR32, INITCOMMONCONTROLSEX, ImageList_Create, ImageList_Destroy,
+            ImageList_SetImageCount, InitCommonControlsEx, LVA_DEFAULT, LVIF_IMAGE, LVIF_TEXT,
+            LVIR_ICON, LVIS_FOCUSED, LVIS_SELECTED, LVITEMW, LVM_ARRANGE, LVM_DELETEALLITEMS,
+            LVM_EDITLABELW, LVM_ENSUREVISIBLE, LVM_GETEDITCONTROL, LVM_GETITEMRECT,
+            LVM_INSERTITEMW, LVM_SETBKCOLOR, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETICONSPACING,
+            LVM_SETIMAGELIST, LVM_SETITEMSTATE, LVN_BEGINLABELEDITW, LVN_ENDLABELEDITW,
+            LVN_ITEMCHANGED, LVS_AUTOARRANGE, LVS_EDITLABELS, LVS_EX_DOUBLEBUFFER,
+            LVS_SHAREIMAGELISTS, LVS_SHOWSELALWAYS, LVS_SINGLESEL, LVSIL_NORMAL, NM_CLICK,
+            NM_CUSTOMDRAW, NM_DBLCLK, NM_KILLFOCUS, NMHDR, NMITEMACTIVATE, NMLISTVIEW,
+            NMLVCUSTOMDRAW, NMLVDISPINFOW,
         },
-        Input::KeyboardAndMouse::{EnableWindow, SetFocus, VK_F2, VK_RETURN},
+        Input::KeyboardAndMouse::{
+            GetDoubleClickTime, GetKeyState, SetFocus, VK_CONTROL, VK_F2, VK_RETURN,
+        },
         Shell::ShellExecuteW,
         WindowsAndMessaging::*,
     },
@@ -48,20 +62,19 @@ use crate::{
     terminal::default_relay,
 };
 
-const WIDTH: i32 = 930;
-const HEIGHT: i32 = 600;
-const HEADER: u32 = 0x393219;
-const PAPER: u32 = 0x00ff_ffff;
-const DIM: u32 = 0x006e_5b46;
+mod gallery;
+use gallery::{BACKGROUND, CARD_HEIGHT, Layout, MARGIN, MUTED, SURFACE, Style, TEXT, TOP, rect};
+
+const WIDTH: i32 = 1180;
+const HEIGHT: i32 = 700;
+const MIN_WIDTH: i32 = 575;
+const MIN_HEIGHT: i32 = 440;
 const APP_ICON_RESOURCE: usize = 1;
-const HEADER_ICON_SIZE: i32 = 42;
 
 const LIST: u16 = 101;
 const NEW: u16 = 102;
 const DELETE: u16 = 103;
-const SAVE: u16 = 104;
 const CONNECT: u16 = 105;
-const BROWSE: u16 = 106;
 const COPY: u16 = 107;
 const OPEN_DATA: u16 = 108;
 const ENROLL: u16 = 109;
@@ -69,7 +82,6 @@ const INSTALL_SSH_KEY: u16 = 110;
 const ISSUE_INVITE: u16 = 111;
 const EXPORT: u16 = 112;
 const IMPORT: u16 = 113;
-const RELAY_EDIT: u16 = 114;
 const FORWARD: u16 = 115;
 const LANG_RU: u16 = 116;
 const LANG_EN: u16 = 117;
@@ -80,11 +92,18 @@ const CHECK_UPDATES: u16 = 121;
 const OPEN_UPDATE: u16 = 122;
 const FILES: u16 = 123;
 const NOTES: u16 = 124;
+const SETTINGS: u16 = 125;
+const ACTIONS: u16 = 126;
+const COPY_ENDPOINT: u16 = 127;
+const EDIT: u16 = 128;
+const SEARCH: u16 = 129;
+const RENAME: u16 = 130;
+const REVEAL_RENAMED: u16 = 131;
 const UPDATE_TIMER: usize = 1;
 const UPDATE_RESULT_TIMER: usize = 2;
+const RENAME_TIMER: usize = 3;
 const UPDATE_INTERVAL_MS: u32 = 6 * 60 * 60 * 1000;
-const APP_MENU_RESOURCE: usize = 3;
-const STYLE: u32 = WS_OVERLAPPEDWINDOW;
+const WINDOW_STYLE: u32 = WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN;
 
 const INVITATION_DIALOG: usize = 2;
 const INVITATION_CODE: i32 = 2001;
@@ -93,24 +112,35 @@ const NOTES_DIALOG: usize = 10;
 const NOTES_PROFILE: i32 = 4101;
 const NOTES_TEXT: i32 = 4102;
 const NOTES_ERROR: i32 = 4103;
+const PROFILE_DIALOG: usize = 11;
+const PROFILE_NAME: i32 = 4201;
+const PROFILE_USER: i32 = 4202;
+const PROFILE_ENDPOINT: i32 = 4203;
+const PROFILE_RELAY: i32 = 4204;
+const PROFILE_TOKEN: i32 = 4205;
+const PROFILE_KEY: i32 = 4206;
+const PROFILE_BROWSE: i32 = 4207;
+const PROFILE_OPEN: i32 = 4208;
+const PROFILE_FILES: i32 = 4209;
+const PROFILE_ERROR: i32 = 4210;
 
 #[derive(Default)]
 struct Controls {
-    title: HWND,
-    caption: HWND,
+    brand: HWND,
+    heading: HWND,
+    settings: HWND,
     update: HWND,
+    add: HWND,
+    search: HWND,
     list: HWND,
     empty_help: HWND,
     empty_join: HWND,
     empty_manual: HWND,
-    name: HWND,
-    user: HWND,
-    endpoint: HWND,
-    relay: HWND,
-    token: HWND,
-    ssh_key: HWND,
-    notes: HWND,
-    my_id: HWND,
+    actions: HWND,
+    files: HWND,
+    connect: HWND,
+    copy: HWND,
+    clipboard: HWND,
     status: HWND,
 }
 
@@ -118,48 +148,22 @@ struct View {
     store: Store,
     id: EndpointId,
     profiles: Vec<Profile>,
+    visible: Vec<usize>,
     selected: Option<usize>,
-    clicked: Option<usize>,
-    rename_armed: bool,
+    clicked: Option<(usize, Instant)>,
+    rename_target: Option<usize>,
     controls: Controls,
     check: Option<UpdateCheck>,
     available: Option<UpdateInfo>,
-    font: HFONT,
-    title_font: HFONT,
-    header_brush: windows_sys::Win32::Graphics::Gdi::HBRUSH,
+    style: Style,
+    card_images: RefCell<Option<CardImages>>,
     header_icon: Icon,
     instance: HINSTANCE,
-    layout: RefCell<Vec<ChildLayout>>,
 }
 
 struct UpdateCheck {
     result: Receiver<Result<UpdateInfo>>,
     manual: bool,
-}
-
-struct ChildLayout {
-    window: HWND,
-    caption: &'static str,
-    rect: [i32; 4],
-    horizontal: Anchor,
-    vertical: Anchor,
-}
-
-#[derive(Clone, Copy)]
-enum Anchor {
-    Start,
-    End,
-    Stretch,
-}
-
-impl Anchor {
-    fn apply(self, start: i32, length: i32, extra: i32) -> (i32, i32) {
-        match self {
-            Self::Start => (start, length),
-            Self::End => (start + extra, length),
-            Self::Stretch => (start, length + extra),
-        }
-    }
 }
 
 pub fn show(store: Store) -> Result<()> {
@@ -177,7 +181,7 @@ pub fn show(store: Store) -> Result<()> {
     let small_icon = Icon::load(instance, unsafe { GetSystemMetrics(SM_CXSMICON) }, unsafe {
         GetSystemMetrics(SM_CYSMICON)
     })?;
-    let header_icon = Icon::load(instance, HEADER_ICON_SIZE, HEADER_ICON_SIZE)?;
+    let header_icon = Icon::load(instance, 30, 30)?;
     let list_controls = INITCOMMONCONTROLSEX {
         dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
         dwICC: ICC_LISTVIEW_CLASSES,
@@ -194,8 +198,6 @@ pub fn show(store: Store) -> Result<()> {
         hIcon: large_icon.0,
         hIconSm: small_icon.0,
         hCursor: unsafe { LoadCursorW(null_mut(), IDC_ARROW) },
-        hbrBackground: (COLOR_WINDOW as usize + 1) as _,
-        lpszMenuName: APP_MENU_RESOURCE as *const u16,
         lpszClassName: class.as_ptr(),
         ..unsafe { std::mem::zeroed() }
     };
@@ -207,18 +209,17 @@ pub fn show(store: Store) -> Result<()> {
         store,
         id,
         profiles,
+        visible: Vec::new(),
         selected: None,
         clicked: None,
-        rename_armed: false,
+        rename_target: None,
         controls: Controls::default(),
         check: None,
         available: None,
-        font: font(-16, 400),
-        title_font: font(-30, 700),
-        header_brush: unsafe { CreateSolidBrush(HEADER) },
+        style: Style::new(),
+        card_images: RefCell::default(),
         header_icon,
         instance,
-        layout: RefCell::default(),
     });
     let mut rect = RECT {
         left: 0,
@@ -226,14 +227,14 @@ pub fn show(store: Store) -> Result<()> {
         right: WIDTH,
         bottom: HEIGHT,
     };
-    unsafe { AdjustWindowRectEx(&mut rect, STYLE, 1, 0) };
-    let title = wide("sshi — подключения");
+    unsafe { AdjustWindowRectEx(&mut rect, WINDOW_STYLE, 0, 0) };
+    let title = wide("SSHI");
     let root = unsafe {
         CreateWindowExW(
             0,
             class.as_ptr(),
             title.as_ptr(),
-            STYLE,
+            WINDOW_STYLE,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             rect.right - rect.left,
@@ -251,6 +252,13 @@ pub fn show(store: Store) -> Result<()> {
         ));
     }
     unsafe {
+        let dark: i32 = 1;
+        DwmSetWindowAttribute(
+            root,
+            DWMWA_USE_IMMERSIVE_DARK_MODE as u32,
+            (&dark as *const i32).cast(),
+            size_of::<i32>() as u32,
+        );
         SendMessageW(root, WM_SETICON, ICON_BIG as WPARAM, large_icon.0 as LPARAM);
         SendMessageW(
             root,
@@ -272,12 +280,25 @@ pub fn show(store: Store) -> Result<()> {
                     .context(tr("Прочитать события окна", "Read window events"));
             }
             _ => {
-                let list = view.borrow().controls.list;
-                if message.hwnd == list && message.message == WM_KEYDOWN {
-                    let item = unsafe {
-                        SendMessageW(list, LVM_GETNEXTITEM, usize::MAX, LVNI_SELECTED as LPARAM)
+                if message.message == WM_KEYDOWN {
+                    let (search, list, selected) = {
+                        let view = view.borrow();
+                        (
+                            view.controls.search,
+                            view.controls.list,
+                            view.selected.is_some(),
+                        )
                     };
-                    if item >= 0 && !list.is_null() {
+                    let control = unsafe { GetKeyState(VK_CONTROL as i32) } < 0;
+                    if control && message.wParam == b'F' as usize {
+                        unsafe { SetFocus(search) };
+                        continue;
+                    }
+                    if control && message.wParam == b'N' as usize {
+                        unsafe { SendMessageW(root, WM_COMMAND, NEW.into(), 0) };
+                        continue;
+                    }
+                    if message.hwnd == list && selected {
                         match message.wParam as u16 {
                             VK_RETURN => {
                                 if message.lParam & (1 << 30) == 0 {
@@ -286,8 +307,7 @@ pub fn show(store: Store) -> Result<()> {
                                 continue;
                             }
                             VK_F2 => {
-                                view.borrow_mut().rename_armed = true;
-                                unsafe { SendMessageW(list, LVM_EDITLABELW, item as usize, 0) };
+                                unsafe { SendMessageW(root, WM_COMMAND, RENAME.into(), 0) };
                                 continue;
                             }
                             _ => {}
@@ -332,25 +352,27 @@ impl Drop for Icon {
     }
 }
 
-fn font(height: i32, weight: i32) -> HFONT {
-    let name = wide("Segoe UI");
-    unsafe {
-        CreateFontW(
-            height,
-            0,
-            0,
-            0,
-            weight,
-            0,
-            0,
-            0,
-            1,
-            0,
-            0,
-            5,
-            0,
-            name.as_ptr(),
-        )
+struct CardImages {
+    handle: HIMAGELIST,
+    width: i32,
+}
+
+impl CardImages {
+    fn new(width: i32) -> Option<Self> {
+        // A blank native image defines the clickable card rectangle. Custom draw supplies its content.
+        let handle =
+            unsafe { ImageList_Create((width - 2).max(1), CARD_HEIGHT, ILC_COLOR32, 1, 1) };
+        if handle == 0 {
+            return None;
+        }
+        let images = Self { handle, width };
+        (unsafe { ImageList_SetImageCount(handle, 1) } != 0).then_some(images)
+    }
+}
+
+impl Drop for CardImages {
+    fn drop(&mut self) {
+        unsafe { ImageList_Destroy(self.handle) };
     }
 }
 
@@ -372,11 +394,11 @@ unsafe extern "system" fn window_proc(
         let mut rect = RECT {
             left: 0,
             top: 0,
-            right: WIDTH,
-            bottom: HEIGHT,
+            right: MIN_WIDTH,
+            bottom: MIN_HEIGHT,
         };
         unsafe {
-            AdjustWindowRectEx(&mut rect, STYLE, 1, 0);
+            AdjustWindowRectEx(&mut rect, WINDOW_STYLE, 0, 0);
             let limits = &mut *(lparam as *mut MINMAXINFO);
             limits.ptMinTrackSize.x = rect.right - rect.left;
             limits.ptMinTrackSize.y = rect.bottom - rect.top;
@@ -396,9 +418,14 @@ unsafe extern "system" fn window_proc(
                 return 0;
             }
             WM_NOTIFY if wparam == usize::from(LIST) => {
+                if unsafe { (*(lparam as *const NMHDR)).code } == NM_CUSTOMDRAW {
+                    if let Ok(view) = view.try_borrow() {
+                        return view.paint_cards(unsafe { &*(lparam as *const NMLVCUSTOMDRAW) });
+                    }
+                    return CDRF_DODEFAULT as LRESULT;
+                }
                 if let Ok(mut view) = view.try_borrow_mut() {
-                    // List-view label, selection and click notifications carry different NMHDR payloads.
-                    match unsafe { view.list_notify(lparam) } {
+                    match unsafe { view.list_notify(hwnd, lparam) } {
                         Ok(reply) => return reply,
                         Err(error) => view.status(&format!("{error:#}")),
                     }
@@ -423,56 +450,69 @@ unsafe extern "system" fn window_proc(
                 }
                 return 0;
             }
-            WM_SIZE if wparam != SIZE_MINIMIZED as usize => {
-                if let Ok(view) = view.try_borrow() {
-                    let mut rect: RECT = unsafe { std::mem::zeroed() };
-                    unsafe { GetClientRect(hwnd, &mut rect) };
-                    for child in view.layout.borrow().iter() {
-                        let [left, top, width, height] = child.rect;
-                        let (left, width) = child.horizontal.apply(left, width, rect.right - WIDTH);
-                        let (top, height) = child.vertical.apply(top, height, rect.bottom - HEIGHT);
-                        unsafe { MoveWindow(child.window, left, top, width, height, 1) };
-                    }
+            WM_TIMER if wparam == RENAME_TIMER => {
+                unsafe { KillTimer(hwnd, RENAME_TIMER) };
+                if let Ok(mut view) = view.try_borrow_mut()
+                    && view
+                        .rename_target
+                        .take()
+                        .is_some_and(|index| Some(index) == view.selected)
+                {
+                    view.rename_selected(hwnd);
                 }
                 return 0;
             }
-            WM_CTLCOLORSTATIC => {
+            WM_SIZE if wparam != SIZE_MINIMIZED as usize => {
+                if let Ok(view) = view.try_borrow() {
+                    view.layout(hwnd);
+                }
+                return 0;
+            }
+            WM_DRAWITEM if lparam != 0 => {
+                if let Ok(view) = view.try_borrow() {
+                    let item = unsafe { &*(lparam as *const DRAWITEMSTRUCT) };
+                    view.style.button(
+                        item.hDC,
+                        item.rcItem,
+                        &text(item.hwndItem),
+                        item.itemState,
+                        item.CtlID as u16,
+                    );
+                    return 1;
+                }
+            }
+            WM_CTLCOLORSTATIC | WM_CTLCOLOREDIT => {
                 if let Ok(view) = view.try_borrow() {
                     let control = lparam as HWND;
-                    if control == view.controls.title || control == view.controls.caption {
-                        unsafe {
-                            SetTextColor(wparam as _, PAPER);
-                            SetBkColor(wparam as _, HEADER);
-                        }
-                        return view.header_brush as LRESULT;
+                    let surface = control == view.controls.brand || control == view.controls.search;
+                    unsafe {
+                        SetTextColor(
+                            wparam as _,
+                            if control == view.controls.status
+                                || control == view.controls.empty_help
+                            {
+                                MUTED
+                            } else {
+                                TEXT
+                            },
+                        );
+                        SetBkColor(wparam as _, if surface { SURFACE } else { BACKGROUND });
                     }
-                    if control == view.controls.status {
-                        unsafe { SetTextColor(wparam as _, DIM) };
-                    }
+                    return if surface {
+                        view.style.surface
+                    } else {
+                        view.style.background
+                    } as LRESULT;
                 }
             }
             WM_PAINT => {
                 if let Ok(view) = view.try_borrow() {
                     let mut paint: PAINTSTRUCT = unsafe { std::mem::zeroed() };
                     let hdc = unsafe { BeginPaint(hwnd, &mut paint) };
-                    let mut header: RECT = unsafe { std::mem::zeroed() };
-                    unsafe { GetClientRect(hwnd, &mut header) };
-                    header.bottom = 70;
-                    unsafe {
-                        FillRect(hdc, &header, view.header_brush);
-                        DrawIconEx(
-                            hdc,
-                            20,
-                            14,
-                            view.header_icon.0,
-                            HEADER_ICON_SIZE,
-                            HEADER_ICON_SIZE,
-                            0,
-                            null_mut(),
-                            DI_NORMAL,
-                        );
-                        EndPaint(hwnd, &paint);
-                    }
+                    let layout = Layout::read(hwnd, view.current().is_some());
+                    view.style
+                        .workspace(hdc, &layout, view.header_icon.0, view.current());
+                    unsafe { EndPaint(hwnd, &paint) };
                     return 0;
                 }
             }
@@ -484,263 +524,252 @@ unsafe extern "system" fn window_proc(
 
 impl View {
     fn create_controls(&mut self, hwnd: HWND) -> Result<()> {
-        self.controls.title = self.label(hwnd, "sshi", [74, 16, 83, 40])?;
-        unsafe { SendMessageW(self.controls.title, WM_SETFONT, self.title_font as usize, 1) };
-        self.controls.caption = self.label(hwnd, "SSH через iroh", [162, 28, 240, 23])?;
-        self.controls.update = self.button(hwnd, "", [486, 20, 273, 32], OPEN_UPDATE)?;
-        unsafe { ShowWindow(self.controls.update, SW_HIDE) };
-        self.button(hwnd, "Папка данных", [772, 20, 134, 32], OPEN_DATA)?;
-
-        self.label(hwnd, "Подключения", [22, 92, 236, 23])?;
+        self.controls.brand = self.control(hwnd, "STATIC", 0, SS_NOPREFIX)?;
+        self.controls.settings = self.button(hwnd, SETTINGS)?;
+        self.controls.update = self.button(hwnd, OPEN_UPDATE)?;
+        self.controls.heading = self.control(hwnd, "STATIC", 0, SS_NOPREFIX)?;
+        self.controls.add = self.button(hwnd, NEW)?;
+        self.controls.search =
+            self.control(hwnd, "EDIT", SEARCH, WS_TABSTOP | ES_AUTOHSCROLL as u32)?;
         self.controls.list = self.control(
             hwnd,
             "SysListView32",
-            "",
-            [22, 124, 236, 394],
             LIST,
             WS_TABSTOP
-                | LVS_REPORT
-                | LVS_NOCOLUMNHEADER
                 | LVS_SINGLESEL
                 | LVS_EDITLABELS
-                | LVS_SHOWSELALWAYS,
-            WS_EX_CLIENTEDGE,
+                | LVS_SHOWSELALWAYS
+                | LVS_AUTOARRANGE
+                | LVS_SHAREIMAGELISTS,
         )?;
-        let column = LVCOLUMNW {
-            mask: LVCF_WIDTH,
-            cx: 212,
-            ..Default::default()
-        };
+        self.controls.empty_help = self.control(hwnd, "STATIC", 0, SS_CENTER | SS_NOPREFIX)?;
+        self.controls.empty_join = self.button(hwnd, EMPTY_JOIN)?;
+        self.controls.empty_manual = self.button(hwnd, MANUAL)?;
+        self.controls.copy = self.button(hwnd, COPY_ENDPOINT)?;
+        self.controls.actions = self.button(hwnd, ACTIONS)?;
+        self.controls.files = self.button(hwnd, FILES)?;
+        self.controls.connect = self.button(hwnd, CONNECT)?;
+        self.controls.status = self.control(hwnd, "STATIC", 0, SS_ENDELLIPSIS | SS_NOPREFIX)?;
+        self.controls.clipboard = self.control(hwnd, "EDIT", 0, ES_READONLY as u32)?;
         unsafe {
+            ShowWindow(self.controls.clipboard, SW_HIDE);
+            SendMessageW(self.controls.brand, WM_SETFONT, self.style.name as usize, 1);
             SendMessageW(
-                self.controls.list,
-                LVM_INSERTCOLUMNW,
-                0,
-                (&column as *const LVCOLUMNW) as LPARAM,
+                self.controls.heading,
+                WM_SETFONT,
+                self.style.heading as usize,
+                1,
             );
+            SendMessageW(self.controls.list, LVM_SETBKCOLOR, 0, BACKGROUND as LPARAM);
             SendMessageW(
                 self.controls.list,
                 LVM_SETEXTENDEDLISTVIEWSTYLE,
-                0,
-                LVS_EX_FULLROWSELECT as LPARAM,
+                LVS_EX_DOUBLEBUFFER as usize,
+                LVS_EX_DOUBLEBUFFER as LPARAM,
             );
         }
-        self.controls.empty_help = self.label(hwnd, "Чтобы подключиться, используйте приглашение от владельца сервера или введите адрес вручную.", [29, 146, 219, 78])?;
-        self.controls.empty_join =
-            self.button(hwnd, "По приглашению…", [29, 230, 219, 30], EMPTY_JOIN)?;
-        self.controls.empty_manual =
-            self.button(hwnd, "Ввести вручную…", [29, 269, 219, 30], MANUAL)?;
-        self.show_empty_state();
-        self.button(hwnd, "Новое", [22, 533, 110, 29], NEW)?;
-        self.button(hwnd, "Удалить", [148, 533, 110, 29], DELETE)?;
-
-        self.label(hwnd, "Название подключения", [291, 88, 526, 24])?;
-        self.controls.name = self.edit(hwnd, [291, 127, 328, 30], 0)?;
-        self.button(hwnd, "Терминал", [641, 126, 124, 32], CONNECT)?;
-        self.button(hwnd, "Файлы", [778, 126, 128, 32], FILES)?;
-        self.label(hwnd, "Пользователь", [291, 175, 128, 20])?;
-        self.label(hwnd, "Endpoint ID получателя", [434, 175, 472, 20])?;
-        self.controls.user = self.edit(hwnd, [291, 198, 129, 27], 0)?;
-        self.controls.endpoint = self.edit(hwnd, [434, 198, 472, 27], 0)?;
-        self.label(hwnd, "URL relay", [291, 235, 615, 20])?;
-        self.controls.relay = self.control(
-            hwnd,
-            "EDIT",
-            "",
-            [291, 258, 615, 27],
-            RELAY_EDIT,
-            WS_TABSTOP | ES_AUTOHSCROLL as u32,
-            WS_EX_CLIENTEDGE,
-        )?;
-        let hint = wide(default_relay()?);
-        unsafe {
-            SendMessageW(
-                self.controls.relay,
-                EM_SETCUEBANNER,
-                0,
-                hint.as_ptr() as LPARAM,
-            )
-        };
-        self.label(hwnd, "Токен relay (если требуется)", [291, 295, 615, 20])?;
-        self.controls.token = self.edit(hwnd, [291, 318, 615, 27], ES_PASSWORD as u32)?;
-        self.label(hwnd, "Файл SSH-ключа (необязательно)", [291, 355, 615, 20])?;
-        self.controls.ssh_key = self.edit(hwnd, [291, 378, 496, 27], 0)?;
-        self.button(hwnd, "Выбрать…", [799, 378, 107, 27], BROWSE)?;
-        self.label(hwnd, "Мой Endpoint ID", [291, 417, 615, 20])?;
-        self.controls.my_id = self.edit(hwnd, [291, 440, 496, 27], ES_READONLY as u32)?;
-        self.button(hwnd, "Копировать", [799, 440, 107, 27], COPY)?;
-        self.button(hwnd, "Ввести приглашение…", [291, 480, 198, 28], ENROLL)?;
-        self.button(
-            hwnd,
-            "Добавить SSH-ключ…",
-            [499, 480, 193, 28],
-            INSTALL_SSH_KEY,
-        )?;
-        self.button(
-            hwnd,
-            "Создать приглашение…",
-            [703, 480, 203, 28],
-            ISSUE_INVITE,
-        )?;
-        self.button(hwnd, "Проброс портов…", [291, 533, 199, 29], FORWARD)?;
-        self.controls.notes = self.button(hwnd, "Заметки…", [505, 533, 153, 29], NOTES)?;
-        self.button(hwnd, "Сохранить", [761, 533, 145, 29], SAVE)?;
-        self.controls.status = self.label(hwnd, "", [22, 571, 883, 20])?;
-        set_text(self.controls.my_id, &self.id.to_string());
-        if self.profiles.is_empty() {
-            self.new_profile();
-        } else {
-            self.refresh_list(Some(0));
-            self.select(0)?;
-        }
+        self.refresh_list(hwnd, Some(0));
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn control(
-        &self,
-        parent: HWND,
-        class: &str,
-        text: &'static str,
-        rect: [i32; 4],
-        id: u16,
-        style: u32,
-        ex_style: u32,
-    ) -> Result<HWND> {
-        let is_edit = class == "EDIT";
+    fn control(&self, parent: HWND, class: &str, id: u16, style: u32) -> Result<HWND> {
         let class = wide(class);
-        let caption = text;
-        let text = wide(text);
         let result = unsafe {
             CreateWindowExW(
-                ex_style,
+                0,
                 class.as_ptr(),
-                text.as_ptr(),
+                null(),
                 WS_CHILD | WS_VISIBLE | style,
-                rect[0],
-                rect[1],
-                rect[2],
-                rect[3],
+                0,
+                0,
+                0,
+                0,
                 parent,
                 id as usize as _,
                 self.instance,
                 null(),
             )
         };
-        if result.is_null() {
-            return Err(last_error())
-                .context(tr("Создать элемент окна sshi", "Create an SSHI control"));
-        }
-        unsafe { SendMessageW(result, WM_SETFONT, self.font as usize, 1) };
-        let horizontal = match id {
-            OPEN_DATA | BROWSE | COPY | ENROLL | INSTALL_SSH_KEY | ISSUE_INVITE | SAVE
-            | CONNECT | FILES | FORWARD | NOTES | OPEN_UPDATE => Anchor::End,
-            _ if is_edit && rect[2] >= 400 => Anchor::Stretch,
-            _ => Anchor::Start,
-        };
-        let vertical = match id {
-            LIST => Anchor::Stretch,
-            NEW | DELETE | ENROLL | INSTALL_SSH_KEY | ISSUE_INVITE | SAVE | FORWARD => Anchor::End,
-            _ if rect[1] >= 528 => Anchor::End,
-            _ => Anchor::Start,
-        };
-        self.layout.borrow_mut().push(ChildLayout {
-            window: result,
-            caption,
-            rect,
-            horizontal,
-            vertical,
-        });
+        ensure!(
+            !result.is_null(),
+            "{}: {}",
+            tr("Создать элемент окна SSHI", "Create an SSHI control"),
+            last_error()
+        );
+        unsafe { SendMessageW(result, WM_SETFONT, self.style.font as usize, 1) };
         Ok(result)
     }
 
-    fn label(&self, parent: HWND, text: &'static str, rect: [i32; 4]) -> Result<HWND> {
-        self.control(parent, "STATIC", text, rect, 0, 0, 0)
+    fn button(&self, parent: HWND, id: u16) -> Result<HWND> {
+        self.control(parent, "BUTTON", id, WS_TABSTOP | BS_OWNERDRAW as u32)
     }
 
-    fn edit(&self, parent: HWND, rect: [i32; 4], style: u32) -> Result<HWND> {
-        self.control(
-            parent,
-            "EDIT",
-            "",
-            rect,
-            0,
-            WS_TABSTOP | ES_AUTOHSCROLL as u32 | style,
-            WS_EX_CLIENTEDGE,
-        )
+    fn layout(&self, hwnd: HWND) {
+        let area = Layout::read(hwnd, self.current().is_some());
+        let center = area.width / 2;
+        let middle = area.gallery.top + (area.gallery.bottom - area.gallery.top - 98).max(0) / 2;
+        let placement = [
+            (self.controls.brand, rect(MARGIN + 40, 15, 115, 25)),
+            (
+                self.controls.settings,
+                rect(area.width - MARGIN - 128, 10, 128, 34),
+            ),
+            (
+                self.controls.update,
+                rect(area.width - MARGIN - 350, 10, 212, 34),
+            ),
+            (self.controls.heading, rect(MARGIN, TOP + 20, 385, 45)),
+            (
+                self.controls.add,
+                rect(area.width - MARGIN - 212, TOP + 19, 212, 39),
+            ),
+            (
+                self.controls.search,
+                rect(
+                    area.search.left + 39,
+                    area.search.top + 9,
+                    area.search.right - area.search.left - 51,
+                    23,
+                ),
+            ),
+            (self.controls.list, area.gallery),
+            (
+                self.controls.empty_help,
+                rect(MARGIN, middle, area.width - 2 * MARGIN, 42),
+            ),
+            (
+                self.controls.empty_join,
+                rect(center - 188, middle + 48, 182, 36),
+            ),
+            (
+                self.controls.empty_manual,
+                rect(center + 6, middle + 48, 182, 36),
+            ),
+            (self.controls.copy, area.copy),
+            (self.controls.actions, area.actions[0]),
+            (self.controls.files, area.actions[1]),
+            (self.controls.connect, area.actions[2]),
+            (
+                self.controls.status,
+                rect(MARGIN, area.height - 29, area.width - 2 * MARGIN, 23),
+            ),
+        ];
+        for (window, place) in placement {
+            unsafe {
+                MoveWindow(
+                    window,
+                    place.left,
+                    place.top,
+                    (place.right - place.left).max(0),
+                    (place.bottom - place.top).max(0),
+                    1,
+                );
+            }
+        }
+        let available = (area.gallery.right
+            - area.gallery.left
+            - unsafe { GetSystemMetrics(SM_CXVSCROLL) }
+            - 2)
+        .max(1);
+        let columns = ((available + 12) / 242).clamp(1, 3);
+        let width = available / columns;
+        let mut current = self.card_images.borrow_mut();
+        if current.as_ref().is_none_or(|images| images.width != width)
+            && let Some(images) = CardImages::new(width)
+        {
+            let list = self.controls.list;
+            let spacing = (CARD_HEIGHT as LPARAM + 10) << 16 | width as LPARAM;
+            unsafe {
+                SendMessageW(list, LVM_SETIMAGELIST, LVSIL_NORMAL as usize, images.handle);
+                SendMessageW(list, LVM_SETICONSPACING, 0, spacing);
+                SendMessageW(list, LVM_ARRANGE, LVA_DEFAULT as usize, 0);
+            }
+            *current = Some(images);
+        }
+        unsafe {
+            InvalidateRect(hwnd, null(), 0);
+            InvalidateRect(self.controls.list, null(), 1);
+        }
     }
 
-    fn button(&self, parent: HWND, text: &'static str, rect: [i32; 4], id: u16) -> Result<HWND> {
-        self.control(parent, "BUTTON", text, rect, id, WS_TABSTOP, 0)
+    fn paint_cards(&self, draw: &NMLVCUSTOMDRAW) -> LRESULT {
+        let item = &draw.nmcd;
+        match item.dwDrawStage {
+            CDDS_PREPAINT => {
+                unsafe { FillRect(item.hdc, &item.rc, self.style.background) };
+                CDRF_NOTIFYITEMDRAW as LRESULT
+            }
+            CDDS_ITEMPREPAINT => {
+                if let Some(index) = self.visible.get(item.dwItemSpec) {
+                    let mut bounds = RECT {
+                        left: LVIR_ICON as i32,
+                        ..Default::default()
+                    };
+                    let found = unsafe {
+                        SendMessageW(
+                            self.controls.list,
+                            LVM_GETITEMRECT,
+                            item.dwItemSpec,
+                            (&mut bounds as *mut RECT) as LPARAM,
+                        )
+                    };
+                    if found != 0 {
+                        self.style.card(
+                            item.hdc,
+                            bounds,
+                            &self.profiles[*index],
+                            self.selected == Some(*index),
+                        );
+                        return CDRF_SKIPDEFAULT as LRESULT;
+                    }
+                }
+                CDRF_DODEFAULT as LRESULT
+            }
+            _ => CDRF_DODEFAULT as LRESULT,
+        }
     }
 
     fn apply_language(&self, hwnd: HWND) {
-        set_text(hwnd, tr("sshi — подключения", "sshi — connections"));
-        for child in self.layout.borrow().iter() {
-            if !child.caption.is_empty() {
-                set_text(child.window, lang::caption(child.caption));
-            }
+        for (window, title) in [
+            (self.controls.brand, "SSHI"),
+            (self.controls.settings, tr("Настройки", "Settings")),
+            (self.controls.heading, tr("Подключения", "Connections")),
+            (
+                self.controls.add,
+                tr("+  Новое подключение", "+  New connection"),
+            ),
+            (
+                self.controls.empty_join,
+                tr("По приглашению…", "Join by invitation…"),
+            ),
+            (
+                self.controls.empty_manual,
+                tr("Ввести вручную…", "Enter manually…"),
+            ),
+            (
+                self.controls.copy,
+                tr("Скопировать Endpoint ID", "Copy Endpoint ID"),
+            ),
+            (self.controls.actions, tr("Действия", "Actions")),
+            (self.controls.files, tr("Файлы", "Files")),
+            (
+                self.controls.connect,
+                tr("Открыть терминал", "Open terminal"),
+            ),
+        ] {
+            set_text(window, title);
         }
-        let release = format!(
-            "{} {}",
-            tr("Что нового в", "What’s new in"),
-            env!("CARGO_PKG_VERSION")
-        );
+        let hint = wide(tr("Поиск подключений", "Search connections"));
         unsafe {
-            let menu = GetMenu(hwnd);
-            let profiles = GetSubMenu(menu, 0);
-            let settings = GetSubMenu(menu, 1);
-            let languages = GetSubMenu(settings, 0);
-            for (parent, item, by_position, name) in [
-                (menu, 0, 1, tr("&Подключения", "&Connections")),
-                (menu, 1, 1, tr("&Настройки", "&Settings")),
-                (settings, 0, 1, tr("&Язык", "&Language")),
-                (
-                    profiles,
-                    NEW,
-                    0,
-                    tr("&Новое подключение", "&New connection"),
-                ),
-                (
-                    profiles,
-                    EXPORT,
-                    0,
-                    tr("Сохранить резервную &копию…", "&Back up connections…"),
-                ),
-                (
-                    profiles,
-                    IMPORT,
-                    0,
-                    tr("&Восстановить из копии…", "&Restore from backup…"),
-                ),
-                (settings, WHATS_NEW, 0, release.as_str()),
-                (
-                    settings,
-                    CHECK_UPDATES,
-                    0,
-                    tr("Проверить обновления…", "Check for updates…"),
-                ),
-            ] {
-                let mut title = wide(name);
-                let info = MENUITEMINFOW {
-                    cbSize: size_of::<MENUITEMINFOW>() as u32,
-                    fMask: MIIM_STRING,
-                    dwTypeData: title.as_mut_ptr(),
-                    ..Default::default()
-                };
-                SetMenuItemInfoW(parent, u32::from(item), by_position, &info);
-            }
-            let selected = if lang::english() { LANG_EN } else { LANG_RU };
-            CheckMenuRadioItem(
-                languages,
-                LANG_RU.into(),
-                LANG_EN.into(),
-                selected.into(),
-                MF_BYCOMMAND,
-            );
-            DrawMenuBar(hwnd);
-        }
+            SendMessageW(
+                self.controls.search,
+                EM_SETCUEBANNER,
+                1,
+                hint.as_ptr() as LPARAM,
+            )
+        };
         self.refresh_update_button();
+        self.update_selection(hwnd);
     }
 
     fn check_updates(&mut self, hwnd: HWND, manual: bool) -> Result<()> {
@@ -871,40 +900,85 @@ impl View {
     }
 
     fn command(&mut self, hwnd: HWND, id: u16, event: u16) -> Result<()> {
-        match id {
-            LANG_RU | LANG_EN => {
-                self.store.set_english(id == LANG_EN)?;
+        let command = match id {
+            SETTINGS => popup(
+                hwnd,
+                self.controls.settings,
+                &[
+                    (
+                        COPY,
+                        tr("Скопировать мой Endpoint ID", "Copy my Endpoint ID"),
+                    ),
+                    (OPEN_DATA, tr("Папка данных", "Data folder")),
+                    (0, ""),
+                    (EXPORT, tr("Экспорт подключений…", "Back up connections…")),
+                    (IMPORT, tr("Импорт подключений…", "Restore from backup…")),
+                    (0, ""),
+                    (LANG_RU, "Русский"),
+                    (LANG_EN, "English"),
+                    (0, ""),
+                    (WHATS_NEW, tr("Что нового", "What’s new")),
+                    (
+                        CHECK_UPDATES,
+                        tr("Проверить обновления…", "Check for updates…"),
+                    ),
+                ],
+            )?,
+            ACTIONS if self.current().is_some() => popup(
+                hwnd,
+                self.controls.actions,
+                &[
+                    (EDIT, tr("Изменить профиль…", "Edit profile…")),
+                    (RENAME, tr("Переименовать…", "Rename…")),
+                    (NOTES, tr("Заметки…", "Notes…")),
+                    (FORWARD, tr("Пробросить порт…", "Forward a port…")),
+                    (0, ""),
+                    (ENROLL, tr("Ввести приглашение…", "Redeem invitation…")),
+                    (
+                        ISSUE_INVITE,
+                        tr("Создать приглашение…", "Create invitation…"),
+                    ),
+                    (
+                        INSTALL_SSH_KEY,
+                        tr("Установить SSH-ключ…", "Install SSH key…"),
+                    ),
+                    (0, ""),
+                    (DELETE, tr("Удалить подключение…", "Delete connection…")),
+                ],
+            )?,
+            _ => Some(id),
+        };
+        match command {
+            Some(LANG_RU | LANG_EN) => {
+                self.store.set_english(command == Some(LANG_EN))?;
                 self.apply_language(hwnd);
                 self.status("");
             }
-            CHECK_UPDATES => self.check_updates(hwnd, true)?,
-            OPEN_UPDATE => self.offer_update(hwnd)?,
-            WHATS_NEW => {
-                open_web_page(
-                    hwnd,
-                    concat!(
-                        "https://github.com/gadmin2151/sshi/releases/tag/v",
-                        env!("CARGO_PKG_VERSION")
-                    ),
-                )?;
-            }
-            NEW | EMPTY_JOIN | ENROLL => {
-                let previous = if id == ENROLL {
-                    self.selected.and_then(|i| self.profiles.get(i))
+            Some(CHECK_UPDATES) => self.check_updates(hwnd, true)?,
+            Some(OPEN_UPDATE) => self.offer_update(hwnd)?,
+            Some(WHATS_NEW) => open_web_page(
+                hwnd,
+                concat!(
+                    "https://github.com/gadmin2151/sshi/releases/tag/v",
+                    env!("CARGO_PKG_VERSION")
+                ),
+            )?,
+            Some(NEW | EMPTY_JOIN | ENROLL) => {
+                let previous = if command == Some(ENROLL) {
+                    self.current()
                 } else {
                     None
                 };
                 match crate::join_dialog::show(hwnd, &self.store, self.id, previous)? {
-                    crate::join_dialog::Outcome::Manual => self.new_profile(),
+                    crate::join_dialog::Outcome::Manual => self.edit_connection(hwnd, None)?,
                     crate::join_dialog::Outcome::Saved { name, open } => {
-                        self.profiles = self.store.profiles()?;
-                        let i = self
-                            .profiles
+                        let profiles = self.store.profiles()?;
+                        let index = profiles
                             .iter()
-                            .position(|p| p.name == name)
+                            .position(|profile| profile.name == name)
                             .context(tr("Подключение отсутствует", "Connection not found"))?;
-                        self.refresh_list(Some(i));
-                        self.select(i)?;
+                        self.profiles = profiles;
+                        self.reveal(hwnd, index);
                         self.status(tr(
                             "Доступ разрешён. Подключение сохранено.",
                             "Access granted. Connection saved.",
@@ -916,34 +990,46 @@ impl View {
                     crate::join_dialog::Outcome::Closed => {}
                 }
             }
-            MANUAL => self.new_profile(),
-            DELETE => self.delete(hwnd)?,
-            SAVE => self.save()?,
-            CONNECT => self.connect()?,
-            FILES => self.spawn_terminal("--files")?,
-            NOTES => self.edit_notes(hwnd)?,
-            INSTALL_SSH_KEY => self.spawn_terminal("--copy-ssh-key")?,
-            ISSUE_INVITE => {
-                if text(self.controls.endpoint).trim().is_empty() {
-                    self.status(tr("Приглашение создаёт получатель или уже авторизованный клиент. Отправьте владельцу получателя свой Endpoint ID.", "The receiver or an authorized client issues invitations. Send your endpoint ID to the receiver’s owner."));
-                } else {
-                    let profile = self.form()?;
-                    if let Some((guest, account)) = crate::join_dialog::issue(hwnd, &profile)? {
-                        self.launch_terminal(
-                            profile,
-                            "--issue-invite",
-                            &[&guest.to_string(), &account],
-                        )?;
-                    }
+            Some(MANUAL) => self.edit_connection(hwnd, None)?,
+            Some(EDIT) => {
+                if let Some(index) = self.selected {
+                    self.edit_connection(hwnd, Some(index))?;
                 }
             }
-            FORWARD => {
-                let profile = self.form()?;
+            Some(RENAME) => {
+                self.rename_selected(hwnd);
+            }
+            Some(REVEAL_RENAMED) => {
+                if let Some(index) = self.selected {
+                    self.reveal(hwnd, index);
+                    unsafe { SetFocus(self.controls.list) };
+                }
+            }
+            Some(SEARCH) if event == EN_CHANGE as u16 => {
+                self.refresh_list(hwnd, self.selected);
+            }
+            Some(DELETE) => self.delete(hwnd)?,
+            Some(CONNECT) => self.connect()?,
+            Some(FILES) => self.spawn_terminal("--files")?,
+            Some(NOTES) => self.edit_notes(hwnd)?,
+            Some(INSTALL_SSH_KEY) => self.spawn_terminal("--copy-ssh-key")?,
+            Some(ISSUE_INVITE) => {
+                let profile = self.selected_profile()?;
+                if let Some((guest, account)) = crate::join_dialog::issue(hwnd, &profile)? {
+                    self.launch_terminal(
+                        profile,
+                        "--issue-invite",
+                        &[&guest.to_string(), &account],
+                    )?;
+                }
+            }
+            Some(FORWARD) => {
+                let profile = self.selected_profile()?;
                 if let Some(spec) = crate::forward_dialog::show(hwnd, &profile.name)? {
                     self.launch_terminal(profile, "--forward", &spec.ssh_args())?;
                 }
             }
-            EXPORT => {
+            Some(EXPORT) => {
                 if let Some(path) = choose_file(hwnd, FileAction::Backup)? {
                     self.store.backup(&path)?;
                     self.status(tr(
@@ -952,40 +1038,25 @@ impl View {
                     ));
                 }
             }
-            IMPORT => {
+            Some(IMPORT) => {
                 if let Some(path) = choose_file(hwnd, FileAction::Restore)? {
+                    let selected = self.current().map(|profile| profile.name.clone());
                     let count = self.store.restore(&path)?;
                     self.profiles = self.store.profiles()?;
-                    let selected = self
-                        .selected
-                        .or_else(|| (!self.profiles.is_empty()).then_some(0));
-                    self.refresh_list(selected);
-                    if let Some(index) = selected {
-                        self.select(index)?;
-                    }
+                    let index = self
+                        .profiles
+                        .iter()
+                        .position(|profile| Some(&profile.name) == selected.as_ref());
+                    self.refresh_list(hwnd, index);
                     self.status(&tr_format!(
                         "Добавлено подключений: {count}",
                         "Connections added: {count}"
                     ));
                 }
             }
-            RELAY_EDIT if event == EN_CHANGE as u16 => {
-                // A token belongs to the relay where it was entered.
-                set_text(self.controls.token, "");
-            }
-            BROWSE => {
-                if let Some(path) = choose_file(hwnd, FileAction::Key)? {
-                    set_text(self.controls.ssh_key, &path.to_string_lossy());
-                }
-            }
-            COPY => {
-                unsafe {
-                    SendMessageW(self.controls.my_id, EM_SETSEL, 0, -1);
-                    SendMessageW(self.controls.my_id, WM_COPY, 0, 0);
-                }
-                self.status(tr("Endpoint ID скопирован", "Endpoint ID copied"));
-            }
-            OPEN_DATA => {
+            Some(COPY) => self.copy_id(&self.id.to_string()),
+            Some(COPY_ENDPOINT) => self.copy_id(&self.selected_profile()?.endpoint.to_string()),
+            Some(OPEN_DATA) => {
                 let path = wide(self.store.path());
                 let verb = wide("open");
                 let result = unsafe {
@@ -1004,66 +1075,113 @@ impl View {
         Ok(())
     }
 
-    unsafe fn list_notify(&mut self, param: LPARAM) -> Result<LRESULT> {
-        let list = self.controls.list;
+    fn copy_id(&self, id: &str) {
+        set_text(self.controls.clipboard, id);
+        unsafe {
+            SendMessageW(self.controls.clipboard, EM_SETSEL, 0, -1);
+            SendMessageW(self.controls.clipboard, WM_COPY, 0, 0);
+        }
+        self.status(tr("Endpoint ID скопирован", "Endpoint ID copied"));
+    }
+
+    fn current(&self) -> Option<&Profile> {
+        self.selected.and_then(|index| self.profiles.get(index))
+    }
+
+    fn selected_profile(&self) -> Result<Profile> {
+        self.current()
+            .cloned()
+            .context(tr("Выберите подключение", "Select a connection"))
+    }
+
+    fn list_index(&self, item: i32) -> Option<usize> {
+        usize::try_from(item)
+            .ok()
+            .and_then(|item| self.visible.get(item).copied())
+    }
+
+    fn reset_clicks(&mut self, hwnd: HWND) {
+        unsafe { KillTimer(hwnd, RENAME_TIMER) };
+        self.rename_target = None;
+        self.clicked = None;
+    }
+
+    fn rename_selected(&mut self, hwnd: HWND) {
+        self.reset_clicks(hwnd);
+        if let Some(tile) = self
+            .visible
+            .iter()
+            .position(|index| Some(*index) == self.selected)
+        {
+            unsafe {
+                SetFocus(self.controls.list);
+                SendMessageW(self.controls.list, LVM_EDITLABELW, tile, 0);
+            }
+        }
+    }
+
+    unsafe fn list_notify(&mut self, hwnd: HWND, param: LPARAM) -> Result<LRESULT> {
         match unsafe { (*(param as *const NMHDR)).code } {
             LVN_ITEMCHANGED => {
                 let change = unsafe { &*(param as *const NMLISTVIEW) };
                 if (change.uNewState ^ change.uOldState) & LVIS_SELECTED != 0 {
-                    self.clicked = None;
-                    self.rename_armed = false;
+                    self.reset_clicks(hwnd);
                     if change.uNewState & LVIS_SELECTED != 0 {
-                        self.select(usize::try_from(change.iItem)?)?;
+                        self.selected = self.list_index(change.iItem);
+                        unsafe {
+                            InvalidateRect(hwnd, null(), 0);
+                            InvalidateRect(self.controls.list, null(), 0);
+                        }
+                        self.status("");
                     }
                 }
             }
             NM_CLICK | NM_DBLCLK => {
                 let click = unsafe { &*(param as *const NMITEMACTIVATE) };
-                let row = usize::try_from(click.iItem).ok();
+                let index = self.list_index(click.iItem);
+                let clicked = self.clicked.take();
+                self.reset_clicks(hwnd);
                 if click.hdr.code == NM_DBLCLK {
-                    let activate = row.is_some() && row == self.clicked && row == self.selected;
-                    self.clicked = None;
-                    self.rename_armed = false;
-                    if activate {
+                    if index.is_some()
+                        && index == clicked.map(|(index, _)| index)
+                        && index == self.selected
+                    {
                         self.connect()?;
                     }
-                } else {
-                    self.rename_armed =
-                        row.is_some() && row == self.clicked && row == self.selected;
-                    self.clicked = row;
+                } else if let Some(index) = index {
+                    let interval = unsafe { GetDoubleClickTime() };
+                    if self.selected == Some(index)
+                        && clicked.is_some_and(|(last, time)| {
+                            last == index && time.elapsed() > Duration::from_millis(interval.into())
+                        })
+                    {
+                        self.rename_target = Some(index);
+                        unsafe { SetTimer(hwnd, RENAME_TIMER, interval, None) };
+                    }
+                    self.clicked = Some((index, Instant::now()));
                 }
             }
-            NM_KILLFOCUS => {
-                self.clicked = None;
-                self.rename_armed = false;
-            }
-            LVN_BEGINLABELEDITW => {
-                // The native control handles double-click timing. A row selected at startup
-                // or with the keyboard still needs a first mouse click before renaming.
-                return Ok((!self.rename_armed) as LRESULT);
-            }
+            NM_KILLFOCUS => self.reset_clicks(hwnd),
+            LVN_BEGINLABELEDITW => return Ok(1),
             LVN_ENDLABELEDITW => {
-                self.clicked = None;
-                self.rename_armed = false;
+                self.reset_clicks(hwnd);
                 let item = unsafe { &(*(param as *const NMLVDISPINFOW)).item };
-                if !item.pszText.is_null() {
-                    let index = usize::try_from(item.iItem)?;
-                    let editor = unsafe { SendMessageW(list, LVM_GETEDITCONTROL, 0, 0) } as HWND;
+                if !item.pszText.is_null()
+                    && let Some(index) = self.list_index(item.iItem)
+                {
+                    let editor =
+                        unsafe { SendMessageW(self.controls.list, LVM_GETEDITCONTROL, 0, 0) }
+                            as HWND;
                     ensure!(
                         !editor.is_null(),
                         tr("Поле названия недоступно", "The name editor is unavailable")
                     );
-                    let mut profile = self
-                        .profiles
-                        .get(index)
-                        .context(tr("Подключение отсутствует", "Connection not found"))?
-                        .clone();
+                    let mut profile = self.profiles[index].clone();
                     profile.name = text(editor);
                     self.persist_profile(profile, Some(index))?;
-                    if Some(index) == self.selected {
-                        set_text(self.controls.name, &self.profiles[index].name);
-                    }
                     self.status(tr("Название сохранено", "Name saved"));
+                    // Let the native control finish editing before rebuilding its items.
+                    unsafe { PostMessageW(hwnd, WM_COMMAND, REVEAL_RENAMED.into(), 0) };
                     return Ok(1);
                 }
             }
@@ -1072,145 +1190,123 @@ impl View {
         Ok(0)
     }
 
-    fn select_list_row(&self, row: Option<usize>) {
-        let selected = LVIS_SELECTED | LVIS_FOCUSED;
-        let item = LVITEMW {
-            stateMask: selected,
-            state: if row.is_some() { selected } else { 0 },
-            ..Default::default()
-        };
+    fn update_selection(&self, hwnd: HWND) {
+        let empty = self.visible.is_empty();
+        let initial = self.profiles.is_empty();
+        set_text(
+            self.controls.empty_help,
+            if initial {
+                tr(
+                    "Добавьте подключение по приглашению или укажите Endpoint ID компьютера.",
+                    "Use an invitation or enter the computer’s Endpoint ID to add a connection.",
+                )
+            } else {
+                tr(
+                    "По вашему запросу ничего не найдено.",
+                    "No matching connections.",
+                )
+            },
+        );
         unsafe {
-            SendMessageW(
-                self.controls.list,
-                LVM_SETITEMSTATE,
-                row.unwrap_or(usize::MAX),
-                (&item as *const LVITEMW) as LPARAM,
-            );
-        }
-    }
-
-    fn show_empty_state(&self) {
-        let empty = self.profiles.is_empty();
-        unsafe {
-            ShowWindow(self.controls.list, if empty { SW_HIDE } else { SW_SHOW });
-            for control in [
+            ShowWindow(self.controls.list, if empty { SW_HIDE } else { SW_SHOWNA });
+            ShowWindow(
                 self.controls.empty_help,
-                self.controls.empty_join,
-                self.controls.empty_manual,
+                if empty { SW_SHOWNA } else { SW_HIDE },
+            );
+            for button in [self.controls.empty_join, self.controls.empty_manual] {
+                ShowWindow(button, if initial { SW_SHOWNA } else { SW_HIDE });
+            }
+            for button in [
+                self.controls.actions,
+                self.controls.files,
+                self.controls.connect,
+                self.controls.copy,
             ] {
-                ShowWindow(control, if empty { SW_SHOW } else { SW_HIDE });
+                ShowWindow(
+                    button,
+                    if self.current().is_some() {
+                        SW_SHOWNA
+                    } else {
+                        SW_HIDE
+                    },
+                );
             }
         }
+        self.layout(hwnd);
+        unsafe { InvalidateRect(self.controls.list, null(), 0) };
     }
 
-    fn refresh_list(&mut self, selected: Option<usize>) {
-        self.show_empty_state();
-        self.clicked = None;
-        self.rename_armed = false;
-        unsafe { SendMessageW(self.controls.list, LVM_DELETEALLITEMS, 0, 0) };
-        for (index, profile) in self.profiles.iter().enumerate() {
-            let mut name = wide(&profile.name);
+    fn reveal(&mut self, hwnd: HWND, index: usize) {
+        set_text(self.controls.search, "");
+        self.refresh_list(hwnd, Some(index));
+    }
+
+    fn refresh_list(&mut self, hwnd: HWND, selected: Option<usize>) {
+        let query = text(self.controls.search).trim().to_lowercase();
+        self.visible = self
+            .profiles
+            .iter()
+            .enumerate()
+            .filter_map(|(index, profile)| {
+                (query.is_empty()
+                    || profile.name.to_lowercase().contains(&query)
+                    || format!("{}@{}", profile.user, profile.endpoint)
+                        .to_lowercase()
+                        .contains(&query))
+                .then_some(index)
+            })
+            .collect();
+        self.selected = selected
+            .filter(|index| self.visible.contains(index))
+            .or_else(|| self.visible.first().copied());
+        self.reset_clicks(hwnd);
+        let list = self.controls.list;
+        unsafe {
+            SendMessageW(list, WM_SETREDRAW, 0, 0);
+            SendMessageW(list, LVM_DELETEALLITEMS, 0, 0);
+        }
+        for (tile, index) in self.visible.iter().copied().enumerate() {
+            let mut name = wide(&self.profiles[index].name);
             let item = LVITEMW {
-                mask: LVIF_TEXT,
-                iItem: index as i32,
+                mask: LVIF_TEXT | LVIF_IMAGE,
+                iItem: tile as i32,
+                iImage: 0,
                 pszText: name.as_mut_ptr(),
                 ..Default::default()
             };
             unsafe {
                 SendMessageW(
-                    self.controls.list,
+                    list,
                     LVM_INSERTITEMW,
                     0,
                     (&item as *const LVITEMW) as LPARAM,
                 )
             };
-        }
-        self.select_list_row(selected);
-    }
-
-    fn new_profile(&mut self) {
-        self.selected = None;
-        self.clicked = None;
-        self.rename_armed = false;
-        self.select_list_row(None);
-        set_text(self.controls.name, "");
-        set_text(self.controls.user, "root");
-        set_text(self.controls.endpoint, "");
-        set_text(self.controls.relay, "");
-        set_text(self.controls.token, "");
-        set_text(self.controls.ssh_key, "");
-        self.status(tr(
-            "Добавьте Endpoint ID получателя, чтобы подключиться",
-            "Enter the receiver endpoint ID to connect",
-        ));
-        unsafe {
-            EnableWindow(self.controls.notes, 0);
-            SetFocus(self.controls.name);
-        }
-    }
-
-    fn select(&mut self, index: usize) -> Result<()> {
-        let profile = self
-            .profiles
-            .get(index)
-            .context(tr("Подключение отсутствует", "Connection not found"))?;
-        let token = String::from_utf8(crypt(&profile.relay_token, false)?)
-            .context(tr("Прочитать токен relay", "Read the relay token"))?;
-        self.selected = Some(index);
-        unsafe { EnableWindow(self.controls.notes, 1) };
-        set_text(self.controls.name, &profile.name);
-        set_text(self.controls.user, &profile.user);
-        set_text(self.controls.endpoint, &profile.endpoint.to_string());
-        set_text(self.controls.relay, &profile.relay);
-        set_text(self.controls.token, &token);
-        set_text(self.controls.ssh_key, &profile.ssh_key);
-        self.status("");
-        Ok(())
-    }
-
-    fn form(&self) -> Result<Profile> {
-        let name = text(self.controls.name).trim().to_owned();
-        let user = text(self.controls.user).trim().to_owned();
-        ensure!(
-            iroh_ssh::profiles::valid_user(&user),
-            tr("Укажите имя пользователя SSH", "Enter an SSH username")
-        );
-        let endpoint = text(self.controls.endpoint).trim().parse().context(tr(
-            "Проверьте Endpoint ID получателя",
-            "Check the receiver endpoint ID",
-        ))?;
-        let token = text(self.controls.token);
-        let relay_text = text(self.controls.relay);
-        let inherit = relay_text.trim().is_empty();
-        let relay = relay_url(
-            if inherit {
-                default_relay()?
-            } else {
-                relay_text.trim().to_owned()
+            if self.selected == Some(index) {
+                let state = LVITEMW {
+                    stateMask: LVIS_SELECTED | LVIS_FOCUSED,
+                    state: LVIS_SELECTED | LVIS_FOCUSED,
+                    ..Default::default()
+                };
+                unsafe {
+                    SendMessageW(
+                        list,
+                        LVM_SETITEMSTATE,
+                        tile,
+                        (&state as *const LVITEMW) as LPARAM,
+                    )
+                };
             }
-            .as_str(),
-        )
-        .context(tr("Проверьте URL relay", "Check the relay URL"))?;
-        ensure!(
-            token.trim().is_empty() || relay.scheme() == "https",
-            tr(
-                "Для relay с токеном требуется HTTPS",
-                "A relay with a token requires HTTPS"
-            )
-        );
-        Ok(Profile {
-            name,
-            user,
-            endpoint,
-            relay: if inherit && token.trim().is_empty() {
-                String::new()
-            } else {
-                relay.to_string()
-            },
-            notes: String::new(),
-            ssh_key: text(self.controls.ssh_key).trim().to_owned(),
-            relay_token: crypt(token.trim().as_bytes(), true)?,
-        })
+        }
+        unsafe { SendMessageW(list, WM_SETREDRAW, 1, 0) };
+        self.update_selection(hwnd);
+        if let Some(tile) = self
+            .visible
+            .iter()
+            .position(|index| Some(*index) == self.selected)
+        {
+            unsafe { SendMessageW(list, LVM_ENSUREVISIBLE, tile, 0) };
+        }
     }
 
     fn persist_profile(&mut self, mut profile: Profile, index: Option<usize>) -> Result<usize> {
@@ -1240,12 +1336,42 @@ impl View {
         Ok(selected)
     }
 
-    fn save(&mut self) -> Result<()> {
-        let selected = self.persist_profile(self.form()?, self.selected)?;
-        self.selected = Some(selected);
-        self.refresh_list(Some(selected));
-        self.select(selected)?;
-        self.status(tr("Подключение сохранено", "Connection saved"));
+    fn edit_connection(&mut self, hwnd: HWND, index: Option<usize>) -> Result<()> {
+        let initial = index.and_then(|index| self.profiles.get(index)).cloned();
+        let token = if let Some(profile) = &initial {
+            String::from_utf8(crypt(&profile.relay_token, false)?)
+                .context(tr("Прочитать токен relay", "Read the relay token"))?
+        } else {
+            String::new()
+        };
+        let instance = self.instance;
+        let mut prompt = ProfilePrompt {
+            view: self,
+            index,
+            initial,
+            token,
+            relay: default_relay()?,
+            saved: None,
+        };
+        let result = unsafe {
+            DialogBoxParamW(
+                instance,
+                PROFILE_DIALOG as *const u16,
+                hwnd,
+                Some(profile_dialog),
+                (&mut prompt as *mut ProfilePrompt<'_>) as LPARAM,
+            )
+        };
+        if result == -1 {
+            return Err(last_error()).context(tr(
+                "Открыть редактор подключения",
+                "Open the connection editor",
+            ));
+        }
+        if let Some(index) = prompt.saved {
+            self.reveal(hwnd, index);
+            self.status(tr("Подключение сохранено", "Connection saved"));
+        }
         Ok(())
     }
 
@@ -1306,8 +1432,7 @@ impl View {
         updated.remove(index);
         self.store.save_profiles(&updated)?;
         self.profiles = updated;
-        self.refresh_list(None);
-        self.new_profile();
+        self.refresh_list(hwnd, Some(index.min(self.profiles.len().saturating_sub(1))));
         self.status(tr("Подключение удалено", "Connection deleted"));
         Ok(())
     }
@@ -1317,7 +1442,7 @@ impl View {
     }
 
     fn spawn_terminal(&self, mode: &str) -> Result<()> {
-        self.launch_terminal(self.form()?, mode, &[])
+        self.launch_terminal(self.selected_profile()?, mode, &[])
     }
 
     fn launch_terminal(&self, mut profile: Profile, mode: &str, args: &[&str]) -> Result<()> {
@@ -1347,14 +1472,209 @@ impl View {
     }
 }
 
-impl Drop for View {
-    fn drop(&mut self) {
-        unsafe {
-            DeleteObject(self.font);
-            DeleteObject(self.title_font);
-            DeleteObject(self.header_brush);
+struct ProfilePrompt<'a> {
+    view: &'a mut View,
+    index: Option<usize>,
+    initial: Option<Profile>,
+    token: String,
+    relay: String,
+    saved: Option<usize>,
+}
+
+unsafe extern "system" fn profile_dialog(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> isize {
+    let field = |id| unsafe { GetDlgItem(hwnd, id) };
+    if msg == WM_INITDIALOG {
+        unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, lp) };
+        let prompt = unsafe { &*(lp as *const ProfilePrompt<'_>) };
+        set_text(
+            hwnd,
+            if prompt.initial.is_some() {
+                tr("Настройки подключения", "Connection settings")
+            } else {
+                tr("Новое подключение", "New connection")
+            },
+        );
+        let record = prompt.initial.as_ref();
+        let endpoint = record
+            .map(|profile| profile.endpoint.to_string())
+            .unwrap_or_default();
+        for (id, value) in [
+            (4221, tr("Название подключения", "Connection name")),
+            (4222, tr("Пользователь SSH", "SSH username")),
+            (4223, tr("Endpoint ID получателя", "Receiver endpoint ID")),
+            (4224, tr("URL relay", "Relay URL")),
+            (
+                4225,
+                tr("Токен relay (если требуется)", "Relay token (if required)"),
+            ),
+            (
+                4226,
+                tr("Файл SSH-ключа (необязательно)", "SSH key file (optional)"),
+            ),
+            (PROFILE_NAME, record.map_or("", |profile| &profile.name)),
+            (PROFILE_USER, record.map_or("root", |profile| &profile.user)),
+            (PROFILE_ENDPOINT, &endpoint),
+            (PROFILE_RELAY, record.map_or("", |profile| &profile.relay)),
+            (PROFILE_TOKEN, &prompt.token),
+            (PROFILE_KEY, record.map_or("", |profile| &profile.ssh_key)),
+            (PROFILE_BROWSE, tr("Выбрать…", "Browse…")),
+            (PROFILE_OPEN, tr("Открыть терминал", "Open terminal")),
+            (PROFILE_FILES, tr("Файлы", "Files")),
+            (IDOK, tr("Сохранить", "Save")),
+            (IDCANCEL, tr("Отмена", "Cancel")),
+        ] {
+            set_text(field(id), value);
         }
+        let relay = wide(&prompt.relay);
+        unsafe {
+            SendMessageW(
+                field(PROFILE_RELAY),
+                EM_SETCUEBANNER,
+                0,
+                relay.as_ptr() as LPARAM,
+            )
+        };
+        return 1;
     }
+    if msg == WM_CLOSE {
+        unsafe { EndDialog(hwnd, 0) };
+        return 1;
+    }
+    if msg != WM_COMMAND {
+        return 0;
+    }
+    let id = i32::from(wp as u16);
+    match id {
+        IDCANCEL => {
+            unsafe { EndDialog(hwnd, 0) };
+        }
+        PROFILE_RELAY if (wp >> 16) as u16 == EN_CHANGE as u16 => {
+            // A token is specific to the relay entered with it.
+            set_text(field(PROFILE_TOKEN), "");
+        }
+        PROFILE_BROWSE => match choose_file(hwnd, FileAction::Key) {
+            Ok(Some(path)) => set_text(field(PROFILE_KEY), &path.to_string_lossy()),
+            Ok(None) => {}
+            Err(error) => set_text(field(PROFILE_ERROR), &format!("{error:#}")),
+        },
+        IDOK | PROFILE_OPEN | PROFILE_FILES => {
+            let pointer =
+                unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut ProfilePrompt<'_>;
+            let Some(prompt) = (unsafe { pointer.as_mut() }) else {
+                return 0;
+            };
+            let result = read_profile(hwnd, &prompt.relay).and_then(|profile| {
+                if id == IDOK {
+                    prompt.saved = Some(prompt.view.persist_profile(profile, prompt.index)?);
+                } else {
+                    let mode = if id == PROFILE_OPEN {
+                        "--terminal"
+                    } else {
+                        "--files"
+                    };
+                    prompt.view.launch_terminal(profile, mode, &[])?;
+                }
+                Ok(())
+            });
+            if let Err(error) = result {
+                set_text(field(PROFILE_ERROR), &format!("{error:#}"));
+            } else if id == IDOK {
+                unsafe { EndDialog(hwnd, 1) };
+            } else {
+                set_text(field(PROFILE_ERROR), "");
+            }
+        }
+        _ => return 0,
+    }
+    1
+}
+
+fn read_profile(hwnd: HWND, default: &str) -> Result<Profile> {
+    let value = |id| text(unsafe { GetDlgItem(hwnd, id) });
+    let name = value(PROFILE_NAME).trim().to_owned();
+    let user = value(PROFILE_USER).trim().to_owned();
+    ensure!(
+        iroh_ssh::profiles::valid_user(&user),
+        tr("Укажите имя пользователя SSH", "Enter an SSH username")
+    );
+    let endpoint = value(PROFILE_ENDPOINT).trim().parse().context(tr(
+        "Проверьте Endpoint ID получателя",
+        "Check the receiver endpoint ID",
+    ))?;
+    let relay_input = value(PROFILE_RELAY);
+    let inherit = relay_input.trim().is_empty();
+    let relay = relay_url(if inherit { default } else { relay_input.trim() })
+        .context(tr("Проверьте URL relay", "Check the relay URL"))?;
+    let token = value(PROFILE_TOKEN);
+    ensure!(
+        token.trim().is_empty() || relay.scheme() == "https",
+        tr(
+            "Для relay с токеном требуется HTTPS",
+            "A relay with a token requires HTTPS"
+        )
+    );
+    Ok(Profile {
+        name,
+        user,
+        endpoint,
+        relay: if inherit && token.trim().is_empty() {
+            String::new()
+        } else {
+            relay.to_string()
+        },
+        notes: String::new(),
+        ssh_key: value(PROFILE_KEY).trim().to_owned(),
+        relay_token: crypt(token.trim().as_bytes(), true)?,
+    })
+}
+
+fn popup(owner: HWND, button: HWND, entries: &[(u16, &str)]) -> Result<Option<u16>> {
+    let menu = unsafe { CreatePopupMenu() };
+    ensure!(
+        !menu.is_null(),
+        "{}: {}",
+        tr("Создать меню", "Create the menu"),
+        last_error()
+    );
+    let result = (|| {
+        let language = if lang::english() { LANG_EN } else { LANG_RU };
+        for (id, title) in entries {
+            let flags = if *id == 0 {
+                MF_SEPARATOR
+            } else if *id == language {
+                MF_CHECKED
+            } else {
+                MF_STRING
+            };
+            ensure!(
+                unsafe { AppendMenuW(menu, flags, usize::from(*id), wide(title).as_ptr()) } != 0,
+                "{}: {}",
+                tr("Добавить действие в меню", "Add a menu action"),
+                last_error()
+            );
+        }
+        let mut anchor = RECT::default();
+        ensure!(
+            unsafe { GetWindowRect(button, &mut anchor) } != 0,
+            "{}: {}",
+            tr("Найти кнопку меню", "Locate the menu button"),
+            last_error()
+        );
+        let command = unsafe {
+            TrackPopupMenu(
+                menu,
+                TPM_RIGHTALIGN | TPM_RETURNCMD | TPM_NONOTIFY,
+                anchor.right,
+                anchor.bottom,
+                0,
+                owner,
+                null(),
+            )
+        };
+        Ok(u16::try_from(command).ok().filter(|id| *id != 0))
+    })();
+    unsafe { DestroyMenu(menu) };
+    result
 }
 
 struct NotesPrompt<'a> {

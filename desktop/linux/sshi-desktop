@@ -78,37 +78,71 @@ def tr(ru, en):
 
 
 STYLE = b"""
-.sshi-title { font-size: 24pt; font-weight: bold; }
 .sshi-section { font-size: 10pt; font-weight: bold; }
 .sshi-mono { font-family: monospace; font-size: 10pt; }
-.sshi-brand { font-size: 13pt; font-weight: bold; }
-.sshi-profile-icon { color: @theme_selected_fg_color; background-color: #16736c; border-radius: 7px; padding: 7px; }
-.sshi-sidebar row:selected { background-color: #136b64; color: white; }
-.sshi-sidebar row:selected label { color: white; }
 .sshi-card { padding: 15px; background-color: alpha(@theme_fg_color, 0.035); border: 1px solid alpha(@theme_fg_color, 0.13); border-radius: 7px; }
 .sshi-primary.suggested-action { background-image: none; background-color: #136b64; color: white; border-color: #105b55; }
 .sshi-primary.suggested-action:hover { background-color: #198078; }
-.sshi-tool { padding: 7px 10px; }
 
 .sshi-route { padding: 13px; background-color: alpha(@theme_fg_color, 0.04); border: 1px solid alpha(@theme_fg_color, 0.18); border-radius: 9px; }
 .sshi-route-icon { padding: 8px; background-color: #17665f; color: white; border-radius: 9px; }
 .sshi-route-line { min-height: 2px; background-color: @theme_fg_color; opacity: 0.64; }
 .sshi-arrow { font-size: 9pt; }
-.sshi-detail { padding: 30px; }
-.sshi-sidebar { padding: 14px; }
 .sshi-row { padding: 8px 5px; }
 .sshi-primary { padding: 8px 16px; font-weight: bold; }
-.sshi-secondary { padding: 8px 16px; font-weight: bold; }
 .sshi-socket-state { padding: 3px 8px; border-radius: 7px; background-color: alpha(@theme_fg_color, 0.08); }
 .sshi-socket-state.sshi-socket-on { color: @theme_fg_color; background-color: alpha(#15917e, 0.23); border: 1px solid alpha(#15917e, 0.55); }
-.sshi-title-card { padding: 19px; border-radius: 12px; border: 1px solid alpha(#16736c, 0.32); background-color: alpha(#16736c, 0.08); }
-.sshi-title-card .sshi-profile-icon { padding: 11px; }
 .file-toolbar, .file-pane-bar, .file-footer { padding: 10px 13px; background-color: alpha(@theme_fg_color, 0.035); border-bottom: 1px solid alpha(@theme_fg_color, 0.12); }
 .file-pane-title { color: @theme_fg_color; }
 .file-pane { border: 1px solid alpha(@theme_fg_color, 0.11); }
 .file-footer { border-top: 1px solid alpha(@theme_fg_color, 0.12); border-bottom: none; }
 .file-window treeview { -GtkTreeView-vertical-separator: 8px; }
+
+.sshi-workspace, .sshi-workspace viewport, .sshi-workspace flowbox {
+    background-color: #0e1627; color: #f0f4ff;
+}
+.sshi-workspace .sshi-top {
+    background: #151f33; color: #f0f4ff; border-bottom: 1px solid #334664;
+    box-shadow: none; padding: 5px 14px;
+}
+.sshi-workspace .sshi-brand { font-size: 15pt; font-weight: bold; }
+.sshi-workspace .sshi-heading { font-size: 27pt; font-weight: bold; }
+.sshi-workspace .sshi-host-name { font-size: 14pt; font-weight: bold; }
+.sshi-workspace .sshi-muted { color: #a9b9d4; }
+.sshi-workspace entry, .sshi-workspace button.sshi-control {
+    background: #151f33; color: #f0f4ff; border: 1px solid #405573;
+    box-shadow: none; text-shadow: none; border-radius: 8px; padding: 7px 10px;
+}
+.sshi-workspace entry { min-height: 25px; }
+.sshi-workspace entry selection { color: white; background-color: #234b9b; }
+.sshi-workspace button.sshi-control:hover { background: #202e49; }
+.sshi-workspace button.sshi-control:focus, .sshi-workspace entry:focus { border-color: #73a5ff; }
+.sshi-workspace button.sshi-blue {
+    background: #225fdf; color: white; border-color: #3e78f0; font-weight: bold;
+}
+.sshi-workspace button.sshi-blue:hover { background: #2465ed; }
+.sshi-workspace .sshi-cards flowboxchild {
+    min-height: 96px; padding: 12px; color: #f0f4ff; background: #151f33;
+    border: 2px solid #354964; border-radius: 12px;
+}
+.sshi-workspace .sshi-cards flowboxchild:hover { background: #1b2941; }
+.sshi-workspace .sshi-cards flowboxchild:selected { background: #182a49; border-color: #5592ff; }
+.sshi-workspace .sshi-cards flowboxchild:focus { outline-color: #a6c6ff; outline-offset: -5px; }
+.sshi-workspace .sshi-dock {
+    padding: 12px; background: #151f33; border: 1px solid #354964; border-radius: 11px;
+}
+.sshi-workspace .sshi-dock flowboxchild { padding: 0; }
+.sshi-workspace .sshi-badge { padding: 9px; border-radius: 9px; color: white; }
+.sshi-workspace .sshi-badge-0 { background: #225eb1; }
+.sshi-workspace .sshi-badge-1 { background: #9a5707; }
+.sshi-workspace .sshi-badge-2 { background: #bd2755; }
+.sshi-workspace .sshi-badge-3 { background: #087d77; }
+.sshi-workspace .sshi-badge-4 { background: #6943bc; }
+.sshi-workspace .sshi-badge-5 { background: #326f9e; }
 """
+
+HOST_ICONS = ("computer-symbolic", "network-server-symbolic", "cpu-symbolic",
+              "network-wired-symbolic", "utilities-terminal-symbolic", "drive-harddisk-symbolic")
 
 def styled(widget, *classes):
     for cls in classes:
@@ -130,7 +164,7 @@ def label(text, *classes, wrap=False):
 
 
 def action(text, callback, icon=None):
-    item = Gtk.Button.new_with_label(text)
+    item = styled(Gtk.Button.new_with_label(text), "sshi-control")
     if icon:
         item.set_image(Gtk.Image.new_from_icon_name(icon, Gtk.IconSize.BUTTON))
         item.set_always_show_image(True)
@@ -1547,9 +1581,11 @@ class ConnectionDialog(Gtk.Dialog):
 class Window(Gtk.Window):
     def __init__(self):
         super().__init__(title="SSHI")
-        self.set_default_size(950, 585)
+        styled(self, "sshi-workspace")
+        self.set_default_size(1180, 700)
+        self.set_size_request(575, 440)
         self.set_icon_name("sshi")
-        header = Gtk.HeaderBar(title="SSHI", show_close_button=True)
+        header = styled(Gtk.HeaderBar(show_close_button=True), "sshi-top")
         self.set_titlebar(header)
         brand = box(False, 8)
         icon = Gtk.Image.new_from_icon_name("utilities-terminal-symbolic", Gtk.IconSize.BUTTON)
@@ -1561,9 +1597,7 @@ class Window(Gtk.Window):
                 break
         brand.add(icon)
         brand.add(label("SSHI", "sshi-brand"))
-        header.set_custom_title(brand)
-        self.add_button = action("", lambda: self.edit(), "list-add-symbolic")
-        header.pack_start(self.add_button)
+        header.pack_start(brand)
         self.update_info = None
         self.socket_errors = {}
         self.update_error = None
@@ -1572,45 +1606,61 @@ class Window(Gtk.Window):
         self.update_badge = action("", lambda: self.offer_update(self), "software-update-available-symbolic")
         self.update_badge.set_no_show_all(True)
         header.pack_end(self.update_badge)
-        self.menu_button = Gtk.MenuButton()
-        self.menu_button.set_image(Gtk.Image.new_from_icon_name("open-menu-symbolic", Gtk.IconSize.BUTTON))
+        self.menu_button = styled(Gtk.MenuButton(always_show_image=True), "sshi-control")
+        self.menu_button.set_image(Gtk.Image.new_from_icon_name("emblem-system-symbolic", Gtk.IconSize.BUTTON))
         header.pack_end(self.menu_button)
 
-        layout = Gtk.Paned.new(Gtk.Orientation.HORIZONTAL)
+        layout = box(True, 18)
+        layout.set_border_width(26)
         self.add(layout)
-        rail = styled(box(True, 10), "sshi-sidebar", "sidebar")
-        self.sidebar_title = label("", "sshi-section")
-        rail.add(self.sidebar_title)
+        heading = box(False, 12)
+        self.heading = label("", "sshi-heading")
+        heading.pack_start(self.heading, True, True, 0)
+        self.add_button = styled(action("", lambda: self.edit(), "list-add-symbolic"), "sshi-blue")
+        self.add_button.set_valign(Gtk.Align.CENTER)
+        heading.pack_end(self.add_button, False, False, 0)
+        layout.pack_start(heading, False, False, 0)
         self.search = Gtk.SearchEntry()
-        rail.pack_start(self.search, False, False, 0)
-        self.listbox = Gtk.ListBox()
-        self.listbox.set_activate_on_single_click(False)
-        self.listbox.set_selection_mode(Gtk.SelectionMode.SINGLE)
-        self.listbox.set_filter_func(self.matches)
+        layout.pack_start(self.search, False, False, 0)
+
+        self.cards = styled(Gtk.FlowBox(homogeneous=True, row_spacing=12, column_spacing=12,
+                                       min_children_per_line=1, max_children_per_line=3), "sshi-cards")
+        self.cards.set_valign(Gtk.Align.START)
+        self.cards.set_activate_on_single_click(False)
+        self.cards.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        self.cards.set_filter_func(self.matches)
         scroll = Gtk.ScrolledWindow()
         scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        scroll.add(self.listbox)
-        rail.pack_start(scroll, True, True, 0)
-        rail.set_size_request(210, -1)
-        layout.pack1(rail, False, False)
-        self.detail = styled(box(True, 14), "sshi-detail")
-        detail_scroll = Gtk.ScrolledWindow()
-        detail_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        detail_scroll.add(self.detail)
-        layout.pack2(detail_scroll, True, False)
-        layout.set_position(260)
-        self.clicked_row = None
+        scroll.add(self.cards)
+        self.cards.set_vadjustment(scroll.get_vadjustment())
+        self.empty = label("", "sshi-muted", wrap=True)
+        self.empty.set_halign(Gtk.Align.CENTER)
+        self.empty.set_valign(Gtk.Align.CENTER)
+        self.empty.set_justify(Gtk.Justification.CENTER)
+        self.empty.set_max_width_chars(55)
+        self.gallery = Gtk.Stack()
+        self.gallery.add_named(scroll, "cards")
+        self.gallery.add_named(self.empty, "empty")
+        layout.pack_start(self.gallery, True, True, 0)
+        self.dock = styled(Gtk.FlowBox(row_spacing=12, column_spacing=12, min_children_per_line=1,
+                                      max_children_per_line=2, selection_mode=Gtk.SelectionMode.NONE),
+                           "sshi-dock")
+        self.dock.set_no_show_all(True)
+        layout.pack_end(self.dock, False, False, 0)
+
+        self.clicked_card = None
+        self.double_click_card = None
         self.clicked_at = 0
         self.rename_timer = 0
-        self.row_clicks = Gtk.GestureMultiPress.new(self.listbox)
-        self.row_clicks.set_button(Gdk.BUTTON_PRIMARY)
-        self.row_clicks.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
-        self.row_clicks.connect("pressed", self.row_pressed)
-        self.row_clicks.connect("released", self.row_released)
-        self.listbox.connect("row-selected", self.row_selected)
-        self.listbox.connect("row-activated", self.row_activated)
+        self.card_clicks = Gtk.GestureMultiPress.new(self.cards)
+        self.card_clicks.set_button(Gdk.BUTTON_PRIMARY)
+        self.card_clicks.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        self.card_clicks.connect("pressed", self.card_pressed)
+        self.card_clicks.connect("released", self.card_released)
+        self.cards.connect("selected-children-changed", self.card_selected)
+        self.cards.connect("child-activated", self.card_activated)
         scroll.connect("scroll-event", self.reset_clicks)
-        self.search.connect("search-changed", self.filter_rows)
+        self.search.connect("search-changed", self.filter_cards)
         self.connect("set-focus", self.focus_changed)
         self.connect("focus-out-event", self.reset_clicks)
         self.connect("unmap", self.reset_clicks)
@@ -1626,8 +1676,9 @@ class Window(Gtk.Window):
     def refresh_language(self):
         self.refresh_update_ui()
         self.add_button.set_label(tr("Новое подключение", "New connection"))
-        self.sidebar_title.set_text(tr("Подключения", "Connections"))
+        self.heading.set_text(tr("Подключения", "Connections"))
         self.search.set_placeholder_text(tr("Поиск подключений", "Search connections"))
+        self.menu_button.set_label(tr("Настройки", "Settings"))
         self.menu_button.set_tooltip_text(tr("Настройки, идентификатор и резервные копии",
                                              "Settings, Endpoint ID and backups"))
         menu = Gtk.Menu()
@@ -1646,8 +1697,7 @@ class Window(Gtk.Window):
         self.menu_button.set_popup(menu)
         if previous:
             previous.destroy()
-        row = self.listbox.get_selected_row()
-        self.show_profile(row.profile if row else None)
+        self.card_selected()
 
     def safe(self, callback):
         try:
@@ -1664,16 +1714,23 @@ class Window(Gtk.Window):
         dialog.run()
         dialog.destroy()
 
-    def matches(self, row):
-        text = self.search.get_text().casefold()
-        return any(text in row.profile[k].casefold() for k in ("name", "user", "endpoint"))
+    def matches(self, card):
+        text = self.search.get_text().strip().casefold()
+        profile = card.profile
+        return text in profile["name"].casefold() or text in (profile["user"] + "@" + profile["endpoint"]).casefold()
 
-    def filter_rows(self, *_):
+    def selected_card(self):
+        return next(iter(self.cards.get_selected_children()), None)
+
+    def filter_cards(self, *_):
         self.reset_clicks()
-        self.listbox.invalidate_filter()
-        rows = [r for r in self.listbox.get_children() if r.get_child_visible()]
-        if self.listbox.get_selected_row() not in rows:
-            self.listbox.select_row(rows[0] if rows else None)
+        self.cards.invalidate_filter()
+        visible = [card for card in self.cards.get_children() if card.get_child_visible()]
+        if not visible:
+            self.cards.unselect_all()
+        elif self.selected_card() not in visible:
+            self.cards.select_child(visible[0])
+        self.card_selected()
 
     def cancel_rename(self):
         if self.rename_timer:
@@ -1682,163 +1739,191 @@ class Window(Gtk.Window):
 
     def reset_clicks(self, *_):
         self.cancel_rename()
-        self.clicked_row = None
+        self.clicked_card = None
+        self.double_click_card = None
         return False
 
-    def row_selected(self, _, row):
-        if row != self.clicked_row:
+    def card_selected(self, *_):
+        card = self.selected_card()
+        if card != self.clicked_card:
             self.reset_clicks()
-        self.show_profile(row.profile if row else None)
+        self.show_profile(card.profile if card else None)
 
     def focus_changed(self, _, widget):
-        if widget != self.clicked_row:
+        if widget != self.clicked_card:
             self.reset_clicks()
 
-    def row_pressed(self, _, count, x, y):
+    def card_pressed(self, _, count, x, y):
         self.cancel_rename()
         self.press_xy = int(x), int(y)
         self.press_time = GLib.get_monotonic_time() // 1000
+        card = self.cards.get_child_at_pos(*self.press_xy)
+        self.double_click_card = card if count == 2 and card == self.clicked_card else None
 
-    def row_released(self, _, count, x, y):
-        row = self.listbox.get_row_at_y(int(y))
-        if (count != 1 or row is None or row != self.listbox.get_row_at_y(self.press_xy[1])
-                or self.listbox.drag_check_threshold(*self.press_xy, int(x), int(y))):
+    def card_released(self, _, count, x, y):
+        card = self.cards.get_child_at_pos(int(x), int(y))
+        if (card is None or card != self.cards.get_child_at_pos(*self.press_xy)
+                or self.cards.drag_check_threshold(*self.press_xy, int(x), int(y))):
             self.reset_clicks()
             return
+        if count != 1:
+            self.clicked_card = None
+            return
         delay = self.get_settings().get_property("gtk-double-click-time")
-        if (row == self.clicked_row and row == self.listbox.get_selected_row()
+        if (card == self.clicked_card and card == self.selected_card()
                 and self.press_time - self.clicked_at > delay):
             # A further press within GTK's double-click interval takes precedence.
-            self.rename_timer = GLib.timeout_add(delay, self.rename_after_click, row)
-        self.clicked_row = row
+            self.rename_timer = GLib.timeout_add(delay, self.rename_after_click, card)
+        self.clicked_card = card
         self.clicked_at = self.press_time
 
-    def rename_after_click(self, row):
+    def rename_after_click(self, card):
         self.rename_timer = 0
-        if row == self.clicked_row and row == self.listbox.get_selected_row():
-            self.rename(row.profile)
+        if card == self.clicked_card and card == self.selected_card():
+            self.rename(card.profile)
         return GLib.SOURCE_REMOVE
 
-    def row_activated(self, _, row):
+    def card_activated(self, _, card):
         event = Gtk.get_current_event()
         if (event and event.type in (Gdk.EventType.BUTTON_PRESS, Gdk.EventType.DOUBLE_BUTTON_PRESS,
-                                     Gdk.EventType.TOUCH_BEGIN) and self.clicked_row != row):
-            return  # Two close presses can land on opposite sides of a row boundary.
+                                     Gdk.EventType.BUTTON_RELEASE, Gdk.EventType.TOUCH_BEGIN)
+                and self.double_click_card != card):
+            return  # GTK counts clicks by location, even across neighboring cards.
         self.reset_clicks()
-        self.connect_to(row.profile)
+        self.connect_to(card.profile)
 
     def reload(self, select=None):
+        selected = self.selected_card()
+        name = select if select is not None else selected.profile["name"] if selected else None
         data = json.loads(cli("profile", "list", "--json"))
         self.profiles = sorted(data, key=lambda p: p["name"].casefold())
-        for row in self.listbox.get_children():
-            self.listbox.remove(row)
-        first, chosen = None, None
-        for p in self.profiles:
-            row = Gtk.ListBoxRow()
-            row.profile = p
-            content = styled(box(False, 10), "sshi-row")
-            icon = styled(Gtk.Image.new_from_icon_name("network-server-symbolic", Gtk.IconSize.BUTTON),
-                          "sshi-profile-icon")
-            icon.set_valign(Gtk.Align.CENTER)
-            content.add(icon)
-            info = box(True, 4)
-            info.add(label(p["name"], "sshi-section"))
-            info.add(label(p["user"] + "@" + p["endpoint"][:10] + "…", "dim-label", "sshi-mono"))
-            content.pack_start(info, True, True, 0)
-            row.add(content)
-            self.listbox.add(row)
-            first = first or row
-            if p["name"] == select:
-                chosen = row
-        self.listbox.show_all()
         if select is not None:
             self.search.set_text("")
-        self.listbox.select_row(chosen or first)
-        self.filter_rows()
-        row = self.listbox.get_selected_row()
-        self.show_profile(row.profile if row else None)
+        for card in self.cards.get_children():
+            self.cards.remove(card)
+        chosen = None
+        for p in self.profiles:
+            card = Gtk.FlowBoxChild()
+            card.profile = p
+            card.set_size_request(218, -1)
+            card.get_accessible().set_name(p["name"])
+            card.set_tooltip_text(p["name"] + "\n" + p["user"] + "@" + p["endpoint"])
+            content = box(False, 12)
+            content.set_valign(Gtk.Align.CENTER)
+            content.pack_start(self.host_badge(p, 30), False, False, 0)
+            info = box(True, 5)
+            info.add(label(p["name"], "sshi-host-name"))
+            info.add(label(p["user"] + " · " + p["endpoint"][:8] + "…", "sshi-muted", "sshi-mono"))
+            content.pack_start(info, True, True, 0)
+            card.add(content)
+            self.cards.add(card)
+            if p["name"] == name:
+                chosen = card
+        self.cards.show_all()
+        if chosen:
+            self.cards.select_child(chosen)
+        self.filter_cards()
+
+    def host_badge(self, profile, size):
+        # A profile gets a consistent accent without adding fields to saved data.
+        index = sum((offset + 1) * value for offset, value in enumerate(profile["name"].encode())) % len(HOST_ICONS)
+        name = HOST_ICONS[index]
+        if not Gtk.IconTheme.get_default().has_icon(name):
+            name = "computer-symbolic"
+        icon = Gtk.Image.new_from_icon_name(name, Gtk.IconSize.BUTTON)
+        icon.set_pixel_size(size)
+        icon.set_valign(Gtk.Align.CENTER)
+        return styled(icon, "sshi-badge", f"sshi-badge-{index}")
 
     def show_profile(self, p):
-        for widget in self.detail.get_children():
+        for widget in self.dock.get_children():
             widget.destroy()
-        add = lambda item: self.detail.pack_start(item, False, False, 0)
+        self.empty.set_text(
+            tr("По вашему запросу ничего не найдено.", "No matching connections.") if self.profiles else
+            tr("Добавьте подключение по приглашению или укажите Endpoint ID компьютера.",
+               "Use an invitation or enter the computer’s Endpoint ID to add a connection."))
+        self.gallery.set_visible_child_name("cards" if p else "empty")
+        self.dock.set_visible(p is not None)
         if p is None:
-            add(label(tr("Подключения", "Connections"), "sshi-title"))
-            add(label(tr("По вашему запросу ничего не найдено.", "No matching connections.") if self.profiles else
-                      tr("Начните с приглашения от владельца компьютера или добавьте уже разрешённое подключение.", "Start with an invitation from the computer’s owner or add an authorized connection."), wrap=True))
-            if not self.profiles:
-                button = action(tr("Новое подключение", "New connection"), lambda: self.edit(), "list-add-symbolic")
-                button.set_halign(Gtk.Align.START)
-                add(styled(button, "suggested-action", "sshi-primary"))
-        else:
-            hero = styled(box(False, 13), "sshi-title-card")
-            badge = styled(Gtk.Image.new_from_icon_name("network-server-symbolic", Gtk.IconSize.DND), "sshi-profile-icon")
-            badge.set_valign(Gtk.Align.CENTER)
-            hero.add(badge)
-            name = label(p["name"], "sshi-title", wrap=True)
-            name.set_selectable(True)
-            hero.pack_start(name, True, True, 0)
-            add(hero)
-            card = styled(Gtk.Grid(column_spacing=18, row_spacing=10), "sshi-card")
-            for index, (title, value) in enumerate([(tr("SSH-логин", "SSH user"), p["user"]), ("Endpoint ID", p["endpoint"]),
-                                                    ("Relay", p["relay"] or tr("Из настроек SSHI", "From SSHI settings"))]):
-                card.attach(label(title, "dim-label"), 0, index, 1, 1)
-                field = label(value, "sshi-mono", wrap=True)
-                field.set_hexpand(True)
-                field.set_selectable(True)
-                card.attach(field, 1, index, 1, 1)
-            controls = box()
-            controls.add(styled(action(tr("Открыть терминал", "Open terminal"), lambda: self.connect_to(p),
-                                       "utilities-terminal-symbolic"), "suggested-action", "sshi-primary"))
-            controls.add(styled(action(tr("Файлы", "Files"), lambda: self.safe(lambda: FileWindow(self, p)),
-                                       "folder-open-symbolic"), "sshi-secondary"))
-            controls.add(action(tr("Изменить", "Edit"), lambda: self.edit(p)))
-            add(controls)
-            add(card)
-            add(ControlSocketPanel(p, self.socket_errors))
-            add(self.profile_notes(p))
-            add(label(tr("Инструменты подключения", "Connection tools"), "sshi-section"))
-            tools = Gtk.Grid(column_spacing=9, row_spacing=9, column_homogeneous=True)
-            items = [
-                (tr("Ввести приглашение…", "Redeem invite…"), "mail-read-symbolic",
-                 lambda: ConnectionDialog(self, p).present_form()),
-                (tr("Создать приглашение…", "Create invite…"), "mail-send-symbolic", lambda: self.invite(p)),
-                (tr("Установить SSH-ключ…", "Install SSH key…"), "changes-prevent-symbolic", lambda: self.ssh_key(p)),
-                (tr("Пробросить порт…", "Forward a port…"), "network-wired-symbolic", lambda: self.forward(p)),
-                (tr("Токен этого relay…", "Token for this relay…"), "dialog-password-symbolic", lambda: self.profile_token(p)),
-            ]
-            for index, (caption, icon_name, callback) in enumerate(items):
-                button = styled(action(caption, callback, icon_name), "sshi-tool")
-                tools.attach(button, index % 2, index // 2, 1, 1)
-            add(tools)
-        self.detail.show_all()
+            return
 
-    def profile_notes(self, profile):
-        card = styled(box(True, 8), "sshi-card")
-        header = box(False, 8)
-        header.pack_start(label(tr("Заметки", "Notes"), "sshi-section"), True, True, 0)
-        preview = label("", wrap=True)
-        preview.set_selectable(True)
-        preview.set_ellipsize(Pango.EllipsizeMode.END)
-        preview.set_lines(3)
-        preview.set_no_show_all(True)
+        info = box(False, 13)
+        identity = box(False, 8)
+        identity.add(self.host_badge(p, 21))
+        name = label(p["name"], "sshi-host-name")
+        name.set_tooltip_text(p["name"])
+        name.set_max_width_chars(20)
+        identity.pack_start(name, True, True, 0)
+        info.pack_start(identity, True, True, 0)
+        endpoint = p["endpoint"]
+        relay = p["relay"] or tr("Из настроек SSHI", "From SSHI settings")
+        for title, value, full in (("Endpoint ID", endpoint[:8] + "…" + endpoint[-7:], endpoint),
+                                   ("Relay", relay, relay)):
+            info.add(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL))
+            field = box(True, 3)
+            field.set_valign(Gtk.Align.CENTER)
+            field.add(label(title, "sshi-muted"))
+            text = label(value, "sshi-mono")
+            text.set_tooltip_text(full)
+            if title == "Endpoint ID":
+                text.set_width_chars(len(value))
+            else:
+                text.set_max_width_chars(27)
+            field.add(text)
+            info.pack_start(field, True, True, 0)
+            if title == "Endpoint ID":
+                copy = action("", lambda: Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).set_text(endpoint, -1),
+                              "edit-copy-symbolic")
+                caption = tr("Скопировать Endpoint ID", "Copy Endpoint ID")
+                copy.set_tooltip_text(caption)
+                copy.get_accessible().set_name(caption)
+                info.add(copy)
+        controls = box(False, 8)
+        self.actions_button = styled(Gtk.MenuButton(label=tr("Действия", "Actions"), always_show_image=True),
+                                     "sshi-control")
+        self.actions_button.set_image(Gtk.Image.new_from_icon_name("pan-down-symbolic", Gtk.IconSize.BUTTON))
+        self.actions_button.set_image_position(Gtk.PositionType.RIGHT)
+        menu = Gtk.Menu()
+        for caption, callback in [
+            (tr("Изменить профиль…", "Edit profile…"), lambda: self.edit(p)),
+            (tr("Переименовать…", "Rename…"), lambda: self.rename(p)),
+            (tr("Заметки…", "Notes…"), lambda: self.edit_notes(p)),
+            (tr("SSH-сокет…", "SSH control socket…"), lambda: self.show_socket(p)),
+            (tr("Пробросить порт…", "Forward a port…"), lambda: self.forward(p)),
+            (tr("Ввести приглашение…", "Redeem invite…"), lambda: ConnectionDialog(self, p).present_form()),
+            (tr("Создать приглашение…", "Create invite…"), lambda: self.invite(p)),
+            (tr("Установить SSH-ключ…", "Install SSH key…"), lambda: self.ssh_key(p)),
+            (tr("Токен этого relay…", "Token for this relay…"), lambda: self.profile_token(p)),
+        ]:
+            item = Gtk.MenuItem(label=caption)
+            item.connect("activate", lambda _, fn=callback: self.safe(fn))
+            menu.append(item)
+        menu.show_all()
+        self.actions_button.set_popup(menu)
+        controls.add(self.actions_button)
+        controls.add(action(tr("Файлы", "Files"), lambda: self.safe(lambda: FileWindow(self, p)),
+                            "folder-open-symbolic"))
+        controls.add(styled(action(tr("Открыть терминал", "Open terminal"), lambda: self.connect_to(p),
+                                   "window-new-symbolic"), "sshi-blue"))
+        controls.set_halign(Gtk.Align.END)
+        for group in (info, controls):
+            child = Gtk.FlowBoxChild(can_focus=False)
+            child.add(group)
+            self.dock.add(child)
+            child.show_all()
 
-        def render():
-            notes = profile.get("notes", "")
-            preview.set_text(notes)
-            preview.set_visible(bool(notes))
-            edit.set_label(tr("Изменить…", "Edit…") if notes else tr("Добавить…", "Add…"))
-
-        def open_editor():
-            if self.edit_notes(profile):
-                render()
-
-        edit = action("", open_editor)
-        header.pack_end(edit, False, False, 0)
-        card.pack_start(header, False, False, 0)
-        card.pack_start(preview, False, False, 0)
-        render()
-        return card
+    def show_socket(self, profile):
+        dialog = Gtk.Dialog(title=tr("SSH-сокет", "SSH control socket"), transient_for=self,
+                            modal=True, destroy_with_parent=True)
+        dialog.set_default_size(640, -1)
+        dialog.add_button(tr("Закрыть", "Close"), Gtk.ResponseType.CLOSE)
+        content = dialog.get_content_area()
+        content.set_border_width(12)
+        content.add(label(profile["name"], "sshi-section", wrap=True))
+        content.add(ControlSocketPanel(profile, self.socket_errors))
+        dialog.show_all()
+        dialog.run()
+        dialog.destroy()
 
     def edit_notes(self, profile):
         dialog = Gtk.Dialog(title=tr("Заметки", "Notes"), transient_for=self, modal=True, destroy_with_parent=True)
@@ -1862,7 +1947,6 @@ class Window(Gtk.Window):
         dialog.get_content_area().pack_start(content, True, True, 0)
         dialog.show_all()
         editor.grab_focus()
-        saved = False
         while dialog.run() == Gtk.ResponseType.OK:
             value = buffer.get_text(*buffer.get_bounds(), True)
             if value == original:
@@ -1870,22 +1954,20 @@ class Window(Gtk.Window):
             try:
                 cli("profile", "notes", "--name", profile["name"], "--set", stdin=value)
                 profile["notes"] = value
-                saved = True
                 break
             except (ValueError, OSError, subprocess.SubprocessError) as exc:
                 error_label.set_text(str(exc))
         dialog.destroy()
-        return saved
 
     def keypress(self, _, event):
         self.reset_clicks()
-        row = self.listbox.get_selected_row()
-        if row is not None and self.get_focus() == row:
+        card = self.selected_card()
+        if card is not None and self.get_focus() == card:
             if event.keyval == Gdk.KEY_F2:
-                self.rename(row.profile)
+                self.rename(card.profile)
                 return True
             if event.keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
-                self.connect_to(row.profile)
+                self.connect_to(card.profile)
                 return True
         if event.state & Gdk.ModifierType.CONTROL_MASK:
             if event.keyval in (Gdk.KEY_f, Gdk.KEY_F):

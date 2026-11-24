@@ -35,9 +35,9 @@ def check(binary, root):
                 yield from children(child)
 
     def click_action(caption):
-        button, = [widget for widget in children(window) if isinstance(widget, Gtk.Button)
-                   and widget.get_label() == caption]
-        button.clicked()
+        item, = [widget for widget in window.actions_button.get_popup().get_children()
+                 if widget.get_label() == caption]
+        item.activate()
 
     def with_dialog(open_dialog, inspect):
         failures, verified = [], []
@@ -77,7 +77,7 @@ def check(binary, root):
 
     with_dialog(lambda: setting("Настройки…"), choose_english)
     assert window.search.get_placeholder_text() == "Search connections"
-    assert window.listbox.get_selected_row().profile["name"] == "Test station"
+    assert window.selected_card().profile["name"] == "Test station"
     assert module.LANGUAGE_FILE.read_text().strip() == "en" and load_desktop(binary).language == "en"
 
     def cancel_settings(dialog):
@@ -196,10 +196,10 @@ def check(binary, root):
         selected, = [item for item in children(dialog) if isinstance(item, Gtk.Button) and item.get_label() == caption]
         return selected
 
-    def socket_actions():
+    def socket_actions(dialog):
         nonlocal stopped, refuse_batch
-        window.show_profile(previous[0])
-        panel, = [item for item in children(window) if isinstance(item, module.ControlSocketPanel)]
+        panel, = [item for item in children(dialog) if isinstance(item, module.ControlSocketPanel)]
+        socket_panels.append(panel)
         assert panel.status.get_text() == "Off"
         assert not panel.stop_button.get_visible() and calls[-1][1] == "check"
         assert len(launched) == 3
@@ -207,7 +207,8 @@ def check(binary, root):
         panel.start_button.clicked()
         assert panel.status.get_text() == "On" and panel.copy_button.get_visible()
         assert len(launched) == 3
-        assert not any(isinstance(w, Gtk.Dialog) and w.get_visible() for w in Gtk.Window.list_toplevels())
+        assert not any(isinstance(w, Gtk.Dialog) and w.get_visible() and w != dialog
+                       for w in Gtk.Window.list_toplevels())
         with patch.object(Gtk.Clipboard, "get") as clipboard:
             panel.copy_button.clicked()
             clipboard.return_value.set_text.assert_called_with(command, -1)
@@ -254,9 +255,8 @@ def check(binary, root):
         panel.poll()
         assert panel.status.get_text() == "Off" and not panel.copy_button.get_visible()
 
-        window.show_profile(previous[0])
-        assert panel.disposed and len(launched) == 5
-        assert not any(isinstance(w, Gtk.Dialog) and w.get_visible() for w in Gtk.Window.list_toplevels())
+        assert len(launched) == 5
+        return Gtk.ResponseType.CLOSE
 
     def update_actions(dialog):
         button(dialog, "Check for updates").clicked()
@@ -280,7 +280,9 @@ def check(binary, root):
         return Gtk.ResponseType.CANCEL
 
     with patch.object(module, "cli", fake_cli), patch.object(module, "background", complete):
-        socket_actions()
+        socket_panels = []
+        with_dialog(lambda: click_action("SSH control socket…"), socket_actions)
+        assert socket_panels[0].disposed
         assert not any(directory.exists() for directory in report_dirs)
         with_dialog(lambda: setting("Settings…"), update_actions)
     with tempfile.TemporaryDirectory(dir=root) as report:
@@ -306,9 +308,8 @@ def check(binary, root):
         editor.get_buffer().set_text(notes)
         return Gtk.ResponseType.OK
 
-    with_dialog(lambda: click_action("Add…"), write_notes)
+    with_dialog(lambda: click_action("Notes…"), write_notes)
     window.reload("Test station")
-    assert any(isinstance(w, Gtk.Label) and w.get_text() == notes for w in children(window))
 
     def discard_notes(dialog):
         editor, = [widget for widget in children(dialog) if isinstance(widget, Gtk.TextView)]
@@ -317,7 +318,7 @@ def check(binary, root):
         buffer.set_text("Discard this draft")
         return Gtk.ResponseType.CANCEL
 
-    with_dialog(lambda: click_action("Edit…"), discard_notes)
+    with_dialog(lambda: click_action("Notes…"), discard_notes)
     assert json.loads(module.cli("profile", "list", "--json"))[0]["notes"] == notes
     window.destroy()
     print("GTK notes, settings, translations, forwarding, sockets and update notifications passed")

@@ -24,9 +24,10 @@ def check(binary):
     module.open_terminal = lambda args, hold: launches.append(args)
     window = module.Window()
     window.show_all()
-    clicks = window.listbox
+    clicks = window.cards
     interval = 160
     window.get_settings().set_property("gtk-double-click-time", interval)
+    window.get_settings().set_property("gtk-double-click-distance", 25)
 
     def pump(ms):
         end = time.monotonic() + ms / 1000
@@ -37,16 +38,17 @@ def check(binary):
 
     seat = Gdk.Display.get_default().get_default_seat()
 
-    def click(index, offset=None):
-        area = clicks.get_row_at_index(index).get_allocation()
-        y = area.y + (area.height // 2 if offset is None else offset)
+    def click(index, edge=None):
+        area = clicks.get_child_at_index(index).get_allocation()
+        x = area.x + {"left": 1, "right": area.width - 2}.get(edge, area.width // 2)
+        y = area.y + area.height // 2
         for event_type in (Gdk.EventType.BUTTON_PRESS, Gdk.EventType.BUTTON_RELEASE):
             event = Gdk.Event.new(event_type)
             event.button.window = clicks.get_window()
             event.button.button = Gdk.BUTTON_PRIMARY
             event.button.time = int(time.monotonic() * 1000) % (1 << 32)
-            event.button.x, event.button.y = 55, y
-            event.button.x_root, event.button.y_root = 55, y
+            event.button.x, event.button.y = x, y
+            event.button.x_root, event.button.y_root = x, y
             event.set_device(seat.get_pointer())
             Gtk.main_do_event(event)
 
@@ -86,7 +88,7 @@ def check(binary):
         assert not launches and not dialogs
         click(1)
         pump(wait)
-        assert clicks.get_selected_row().profile["name"] == "Studio"
+        assert window.selected_card().profile["name"] == "Studio"
         assert not launches and not dialogs
         click(1)  # Slow second click could rename; a quick third instead opens once.
         pump(30)
@@ -123,14 +125,23 @@ def check(binary):
         key(Gdk.KEY_Return)
         assert launches[-1] == ["connect", "Work studio"] and len(launches) == 3
 
-        # Two clicks a pixel apart on different rows must not activate either.
+        # Two nearby clicks across the gap between cards must not activate either.
         pump(wait)
-        click(0, clicks.get_row_at_index(0).get_allocation().height - 1)
+        click(0, "right")
         pump(20)
-        click(1, 0)
+        click(1, "left")
         pump(wait)
         assert len(dialogs) == 2 and len(launches) == 3
-        print("GTK selection, double-click, delayed rename, cancellation and keyboard passed")
+        window.search.set_text("GUEST@" + peer[:8].upper())
+        pump(wait)
+        assert window.selected_card() is not None
+        window.search.set_text("missing")
+        pump(wait)
+        assert window.selected_card() is None and not window.dock.get_visible()
+        window.search.set_text("work studio")
+        pump(wait)
+        assert window.selected_card().profile["name"] == "Work studio" and window.dock.get_visible()
+        print("GTK card selection, double-click, delayed rename, keyboard and filtering passed")
     finally:
         GLib.source_remove(poll)
         window.destroy()

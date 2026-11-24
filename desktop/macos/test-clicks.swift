@@ -271,26 +271,26 @@ struct TestProfileClicks {
         let application = NSApplication.shared
         application.setActivationPolicy(.regular)
         application.finishLaunching()
-        let window = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 320, height: 220),
+        let window = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 650, height: 220),
                               styleMask: [.titled], backing: .buffered, defer: false)
         let workspace = Workspace()
         let profiles = try JSONDecoder().decode([Profile].self, from: Client.run(["profile", "list", "--json"]))
         precondition(profiles.count == 2, "the test needs its own two-profile fixture")
         let names = profiles.map(\.name)
         var opened: [String] = []
-        let table = ProfileTable(workspace) { opened.append($0) }
+        let grid = ProfileGrid(workspace) { opened.append($0) }
         workspace.profiles = profiles
         workspace.selected = names[0]
         let scroll = NSScrollView(frame: window.contentView!.bounds)
         scroll.autoresizingMask = [.width, .height]
-        table.frame = scroll.contentView.bounds
-        table.autoresizingMask = [.width]
-        scroll.documentView = table
+        grid.frame = scroll.contentView.bounds
+        grid.autoresizingMask = [.width]
+        scroll.documentView = grid
         window.contentView!.addSubview(scroll)
-        table.update(profiles, selected: names[0])
+        grid.update(profiles, selected: names[0])
         window.makeKeyAndOrderFront(nil)
         application.activate(ignoringOtherApps: true)
-        window.makeFirstResponder(table)
+        window.makeFirstResponder(grid)
 
         func drain(_ duration: TimeInterval) {
             let end = Date(timeIntervalSinceNow: duration)
@@ -301,9 +301,10 @@ struct TestProfileClicks {
             }
         }
         var number = 0
-        func click(_ row: Int, count: Int = 1) {
-            let rect = table.rect(ofRow: row)
-            let position = table.convert(NSPoint(x: rect.midX, y: rect.midY), to: nil)
+        func click(_ index: Int, count: Int = 1) {
+            let path = IndexPath(item: index, section: 0)
+            let rect = grid.collectionViewLayout!.layoutAttributesForItem(at: path)!.frame
+            let position = grid.convert(NSPoint(x: rect.midX, y: rect.midY), to: nil)
             for kind: NSEvent.EventType in [.leftMouseDown, .leftMouseUp] {
                 number += 1
                 let event = NSEvent.mouseEvent(with: kind, location: position, modifierFlags: [],
@@ -319,19 +320,19 @@ struct TestProfileClicks {
         drain(0.2)
         click(0)
         drain(settle)
-        precondition(opened.isEmpty && window.firstResponder === table, "first click on initial selection")
+        precondition(opened.isEmpty && window.firstResponder === grid, "first click on initial selection")
         click(0)
         click(0, count: 2)
         drain(settle)
-        precondition(opened == [names[0]] && window.firstResponder === table,
-                     "double-click on an armed row opens once and cancels rename")
+        precondition(opened == [names[0]] && window.firstResponder === grid,
+                     "double-click on an armed card opens once and cancels rename")
         click(0)
         click(1, count: 2)
         drain(settle)
-        precondition(opened == [names[0]], "two adjacent rows cannot open one another")
+        precondition(opened == [names[0]], "two adjacent cards cannot open one another")
         click(0)
         click(1)
-        precondition(table.selectedRow == 1 && workspace.selected == names[1], "other row selects immediately")
+        precondition(grid.selectedIndex == 1 && workspace.selected == names[1], "other card selects immediately")
         drain(settle)
         click(1)
         drain(settle)
@@ -339,7 +340,7 @@ struct TestProfileClicks {
         editor.string = "Discarded"
         editor.doCommand(by: #selector(NSResponder.cancelOperation(_:)))
         drain(0.1)
-        precondition(workspace.selected == names[1] && window.firstResponder === table, "Escape cancels rename")
+        precondition(workspace.selected == names[1] && window.firstResponder === grid, "Escape cancels rename")
         click(1)
         drain(settle)
         click(1)

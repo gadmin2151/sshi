@@ -4,7 +4,7 @@ import Foundation
 import SwiftUI
 import UniformTypeIdentifiers
 
-struct Profile: Codable, Equatable, Identifiable {
+struct Profile: Codable, Hashable, Identifiable {
     let name: String
     let user: String
     let endpoint: String
@@ -13,7 +13,9 @@ struct Profile: Codable, Equatable, Identifiable {
     var id: String { name }
     var destination: String { "\(user)@\(endpoint)" }
     var prefix: [String] { ["profile", "run", "--name", name, "--"] }
-    func socket(_ action: String) -> [String] { ["socket", action, "--", name] }
+    func socket(_ action: String, batch: Bool = false) -> [String] {
+        ["socket", action] + (batch ? ["--batch"] : []) + ["--", name]
+    }
 }
 
 struct ReleaseUpdate: Decodable {
@@ -73,12 +75,12 @@ enum Client {
         try execute(binary, arguments, input: input)
     }
 
-    static func terminal(_ arguments: [String], hold: Bool, executable: URL = Client.binary) throws {
+    static func terminal(_ arguments: [String], hold: Bool, executable: URL = Client.binary, socketLogin: Bool = false) throws {
         // Terminal user's login shell may differ. AppleScript quotes every argument,
         // then /bin/sh interprets only the fixed wrapper and passes data as argv.
         let script = """
         on run argv
-            set commandLine to ""
+            set commandLine to "\(socketLogin ? "exec" : "")"
             repeat with element in argv
                 set commandLine to commandLine & " " & quoted form of (contents of element)
             end repeat
@@ -94,7 +96,7 @@ enum Client {
         shift 2
         "$@"
         result=$?
-        if [ "$hold" = yes ] || [ "$result" != 0 ]; then
+        if [ "$hold" = yes ] || { [ "$hold" != never ] && [ "$result" != 0 ]; }; then
             printf '\\n%s ' "$prompt"
             read -r answer
         fi
@@ -102,7 +104,7 @@ enum Client {
         """
         _ = try execute(URL(fileURLWithPath: "/usr/bin/osascript"), [
             "-e", script, "/bin/sh", "-c", wrapper, "sshi-terminal",
-            hold ? "yes" : "no", tr("Нажмите Enter, чтобы завершить.", "Press Enter to finish."), executable.path
+            hold ? "yes" : socketLogin ? "never" : "on-error", tr("Нажмите Enter, чтобы завершить.", "Press Enter to finish."), executable.path
         ] + arguments)
     }
 }
@@ -116,7 +118,6 @@ struct SheetItem: Identifiable {
     enum Content {
         case editor(Panel)
         case invitation(InvitationStart)
-        case socket(Profile)
         case files(Profile)
     }
     let content: Content
@@ -130,7 +131,7 @@ final class Workspace: ObservableObject {
     @Published var sheet: SheetItem?
     @Published var feedback: String?
     @Published var busy = false
-    var socketErrors: [String: String] = [:]
+    var socketErrors: [Profile: String] = [:]
     @Published var update: ReleaseUpdate?
     @Published var checkingUpdate = false
     @Published var updateError: String?
@@ -257,6 +258,7 @@ final class Workspace: ObservableObject {
     }
 }
 
+@MainActor
 struct ProfileDetail: View {
     @ObservedObject var workspace: Workspace
     let profile: Profile
@@ -297,6 +299,7 @@ struct ProfileDetail: View {
                     field("Relay", profile.relay.isEmpty ? language("Из настроек SSHI", "From SSHI settings") : profile.relay)
                 }.padding(15).frame(maxWidth: .infinity, alignment: .leading)
                     .background(Color(nsColor: .quaternaryLabelColor).opacity(0.36), in: RoundedRectangle(cornerRadius: 10))
+                SocketControls(workspace: workspace, profile: profile, language: language).id(profile)
                 Text(language("Инструменты подключения", "Connection tools")).font(.headline)
                 Divider()
                 HStack(spacing: 16) {
@@ -309,9 +312,6 @@ struct ProfileDetail: View {
                         Button(language("Установить SSH-ключ…", "Install SSH key…")) { workspace.show(.key(profile)) }
                     }.fixedSize()
                     Button(language("Пробросить порт…", "Forward a port…")) { workspace.show(.forward(profile)) }
-                }
-                Button(language("SSH-сокет…", "SSH control socket…")) {
-                    workspace.sheet = SheetItem(content: .socket(profile))
                 }
             }.padding(30).frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -623,8 +623,7 @@ struct WorkspaceView: View {
             switch item.content {
             case .editor(let panel): Editor(workspace: workspace, panel: panel)
             case .invitation(let start): InvitationSheet(workspace: workspace, start: start)
-            case .socket(let profile): SocketSheet(workspace: workspace, profile: profile, language: language)
-            case .files(let profile): FileBrowser(workspace: workspace, profile: profile, language: language)
+            case .files(let profile): FileBrowser(profile: profile, language: language)
             }
         }
         .alert("SSHI", isPresented: Binding(get: { workspace.feedback != nil }, set: { if !$0 { workspace.feedback = nil } })) {

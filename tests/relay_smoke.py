@@ -121,7 +121,10 @@ def check_file_transfers(profile, env, base):
 
 def check_profile_socket(profile, destination, env, sshd_log):
     def action(name):
-        return run(["sshi", "socket", name, profile], env=env)
+        args = ["sshi", "socket", name]
+        if name == "start":
+            args.append("--batch")
+        return run([*args, "--", profile], env=env)
     path = pathlib.Path(check(action("path"), "print profile socket path").decode().strip())
     command = shlex.split(check(action("command"), "print native SSH command").decode())
     assert command[0] == "ssh" and command[-1] == destination

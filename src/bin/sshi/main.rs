@@ -73,6 +73,8 @@ struct Cli {
     /// Background OpenSSH after authentication.
     #[arg(short = 'f', conflicts_with = "control_command")]
     background: bool,
+    #[arg(long, hide = true, requires = "master")]
+    batch_login: bool,
     /// Disable remote pseudo-terminal allocation.
     #[arg(short = 'T')]
     no_tty: bool,
@@ -404,6 +406,9 @@ fn login_command(cli: &Cli) -> Result<Process> {
     );
     if let Some(profile) = profile {
         profiles::set_relay(&mut ssh, &profile);
+    }
+    if cli.batch_login {
+        ssh.args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=25"]);
     }
     if cli.master {
         ssh.arg("-M");

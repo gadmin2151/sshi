@@ -71,7 +71,7 @@ def check(binary, root):
         combo, = [widget for widget in children(dialog) if isinstance(widget, Gtk.ComboBoxText)]
         assert combo.get_active_id() == "ru"
         link, = [widget for widget in children(dialog) if isinstance(widget, Gtk.LinkButton)]
-        assert link.get_uri() == module.RELEASE_URL and link.get_label() == "Что нового в 0.3.0"
+        assert link.get_uri() == module.RELEASE_URL and link.get_label() == "Что нового в 0.3.1"
         combo.set_active_id("en")
         return Gtk.ResponseType.OK
 
@@ -161,17 +161,27 @@ def check(binary, root):
               "release_url": "https://github.com/gadmin2151/sshi/releases/tag/v1.0.1"}
     calls = []
     stopped = True
+    refuse_batch = False
     report_dirs = []
 
     def fake_cli(*args, **kwargs):
+        nonlocal stopped
         calls.append(args)
         if args == ("update", "--json"):
             if not update:
                 raise ValueError("offline")
             return json.dumps(update)
+        if args == ("socket", "start", "--batch", "--", profile):
+            assert kwargs["timeout"] >= 25
+            if refuse_batch:
+                raise ValueError("Permission denied (publickey)")
+            stopped = False
+            return path
         assert args[2:] == ("--", profile)
         if args[1] == "check" and stopped:
             raise ValueError("No active SSH control socket")
+        if args[1] == "close":
+            stopped = True
         return {"path": path, "command": command, "check": "", "close": ""}[args[1]]
 
     def complete(work, callback):
@@ -186,17 +196,37 @@ def check(binary, root):
         selected, = [item for item in children(dialog) if isinstance(item, Gtk.Button) and item.get_label() == caption]
         return selected
 
-    def socket_actions(dialog):
-        nonlocal stopped
-        assert dialog.get_title() == "SSH control socket" and len(launched) == 3
-        assert [args[1] for args in calls] == ["path", "command", "check"]
-        assert dialog.status.get_text() == "The socket is stopped." and not dialog.stop_button.get_sensitive()
-        assert any(isinstance(item, Gtk.Label) and item.get_text() == command for item in children(dialog))
+    def socket_actions():
+        nonlocal stopped, refuse_batch
+        window.show_profile(previous[0])
+        panel, = [item for item in children(window) if isinstance(item, module.ControlSocketPanel)]
+        assert panel.status.get_text() == "Off"
+        assert not panel.stop_button.get_visible() and calls[-1][1] == "check"
+        assert len(launched) == 3
+
+        panel.start_button.clicked()
+        assert panel.status.get_text() == "On" and panel.copy_button.get_visible()
+        assert len(launched) == 3
+        assert not any(isinstance(w, Gtk.Dialog) and w.get_visible() for w in Gtk.Window.list_toplevels())
         with patch.object(Gtk.Clipboard, "get") as clipboard:
-            button(dialog, "Copy command").clicked()
+            panel.copy_button.clicked()
             clipboard.return_value.set_text.assert_called_with(command, -1)
-            button(dialog, "Copy path").clicked()
+            panel.path_button.clicked()
             clipboard.return_value.set_text.assert_called_with(path, -1)
+
+        panel.stop_button.clicked()
+        assert panel.confirm_button.get_visible() and "disconnect" in panel.feedback.get_text()
+        panel.cancel_button.clicked()
+        assert panel.active and not panel.confirm_button.get_visible()
+        panel.stop_button.clicked()
+        panel.confirm_button.clicked()
+        assert not panel.active and calls[-1][1] == "close"
+
+        refuse_batch = True
+        panel.start_button.clicked()
+        assert panel.status.get_text() == "Off" and panel.terminal_button.get_visible()
+        assert "Permission denied" in panel.detail_text.get_text() and len(launched) == 3
+
         def launch(args, hold, report_dir):
             launched.append((args, hold))
             directory = Path(report_dir)
@@ -204,41 +234,29 @@ def check(binary, root):
             assert directory.stat().st_mode & 0o077 == 0
             (directory / "started").write_text(str(os.getpid()))
             return Mock(poll=lambda: None)
-        with patch.object(module, "open_terminal", launch):
-            dialog.start_button.clicked()
-            assert dialog.report and dialog.timer and not dialog.start_button.get_sensitive()
-            (report_dirs[-1] / "result.json").write_text(json.dumps([255, "Permission denied (publickey)"]))
-            dialog.poll()
-            assert "255" in dialog.status.get_text() and dialog.report is None and not dialog.timer
-            assert dialog.details.get_visible() and "Permission denied" in dialog.detail_text.get_text()
-            dialog.start_button.clicked()
-        assert launched[-1] == (["socket", "start", "--", profile], False)
-        stopped = False
-        dialog.poll()
-        assert "ready" in dialog.status.get_text() and not dialog.start_button.get_sensitive()
-        assert not report_dirs[-1].exists() and not dialog.timer
-        with_dialog(button(dialog, "Stop socket…").clicked, lambda prompt: Gtk.ResponseType.CANCEL)
-        assert calls[-1][1] == "check"
-        with_dialog(button(dialog, "Stop socket…").clicked, lambda prompt: Gtk.ResponseType.OK)
-        assert calls[-1][1] == "close" and "stopped" in dialog.status.get_text()
-        stopped = True
-        button(dialog, "Check status").clicked()
-        assert dialog.status.get_text() == "The socket is stopped."
-        return Gtk.ResponseType.CLOSE
 
-    def reopened(dialog):
-        assert dialog.details.get_visible() and "Permission denied" in dialog.detail_text.get_text()
-        launches = len(launched)
-        with patch.object(module, "open_terminal", return_value=Mock(poll=lambda: None)):
-            dialog.start_button.clicked()
-            directory = Path(dialog.report.name)
-            (directory / "started").write_text(str(os.getpid()))
-            dialog.started_at -= 200
-            dialog.poll()
-            assert not dialog.timer and "then select Check status" in dialog.status.get_text()
-            report_dirs.append(directory)
-        assert launches == len(launched)
-        return Gtk.ResponseType.CLOSE
+        with patch.object(module, "open_terminal", launch):
+            panel.terminal_button.clicked()
+            assert panel.report and "terminal" in panel.status.get_text()
+            (report_dirs[-1] / "result.json").write_text(json.dumps([255, "Test terminal failure"]))
+            panel.poll()
+            assert panel.report is None and "Test terminal failure" in panel.detail_text.get_text()
+            panel.terminal_button.clicked()
+            assert panel.report
+            stopped = False
+            (report_dirs[-1] / "result.json").write_text(json.dumps([0, ""]))
+            panel.poll()
+            assert panel.status.get_text() == "On" and panel.report is None
+        assert launched[-1] == (["socket", "start", "--", profile], False)
+
+        stopped = True
+        panel.last_check -= 6
+        panel.poll()
+        assert panel.status.get_text() == "Off" and not panel.copy_button.get_visible()
+
+        window.show_profile(previous[0])
+        assert panel.disposed and len(launched) == 5
+        assert not any(isinstance(w, Gtk.Dialog) and w.get_visible() for w in Gtk.Window.list_toplevels())
 
     def update_actions(dialog):
         button(dialog, "Check for updates").clicked()
@@ -262,8 +280,7 @@ def check(binary, root):
         return Gtk.ResponseType.CANCEL
 
     with patch.object(module, "cli", fake_cli), patch.object(module, "background", complete):
-        with_dialog(lambda: click_action("SSH control socket…"), socket_actions)
-        with_dialog(lambda: click_action("SSH control socket…"), reopened)
+        socket_actions()
         assert not any(directory.exists() for directory in report_dirs)
         with_dialog(lambda: setting("Settings…"), update_actions)
     with tempfile.TemporaryDirectory(dir=root) as report:

@@ -49,7 +49,7 @@ struct TestProfileClicks {
         precondition(AppLanguage.current(in: defaults) == .russian)
         defaults.set("en", forKey: AppLanguage.preferenceKey)
         let restored = AppLanguage.current(in: UserDefaults(suiteName: suite)!)
-        precondition(restored == .english && restored.whatsNew == "What’s new in 0.3.0")
+        precondition(restored == .english && restored.whatsNew == "What’s new in 0.3.1")
         precondition(ForwardKind.remote.title(restored) == "Access from there")
         precondition(AppLanguage.russian.commandError("Error: duplicate connection name 'old'").contains("уже существует"))
         precondition(restored.commandError("Error: invalid SSH username").contains("Check the SSH username"))
@@ -136,6 +136,7 @@ struct TestProfileClicks {
         var calls: [String] = []
         var launches = 0
         var active = false
+        var refused = false
         var directory: URL?
         let manager = FileManager.default
         let helper = Client.binary.deletingLastPathComponent().appendingPathComponent("sshi-socket-start")
@@ -143,6 +144,10 @@ struct TestProfileClicks {
             precondition(selected == profile)
             calls.append(op)
             switch op {
+            case "batch":
+                if refused { throw ClientError(message: "Permission denied (publickey)") }
+                active = true
+                return "/tmp/test.sock"
             case "path": return "/tmp/test.sock"
             case "command": return "ssh -S /tmp/test.sock -o ProxyCommand=false -- example"
             case "close": active = false; return ""
@@ -154,8 +159,6 @@ struct TestProfileClicks {
             launches += 1
             directory = dir
             if launches == 1 {
-                // Run the packaged terminal reporter and a synthetic failing
-                // SSHI command. Its stdin/stdout are separate from diagnostics.
                 let testCLI = dir.appendingPathComponent("fixture-cli")
                 let script = """
                 #!/bin/sh
@@ -174,24 +177,37 @@ struct TestProfileClicks {
                 try process.run()
                 process.waitUntilExit()
                 precondition(process.terminationStatus == 42)
-            } else { active = true }
+            } else {
+                active = true
+                try "0\n".write(to: dir.appendingPathComponent("result"), atomically: true, encoding: .utf8)
+            }
         })
-        await session.open(profile, .english)
-        precondition(calls == ["path", "command", "check"] && launches == 0 && !session.active)
-        precondition(session.status == "The socket is stopped.")
+        await session.check(profile, .english)
+        precondition(calls == ["check"] && launches == 0 && session.status == "Off")
         session.start(profile, .english)
+        await session.monitor?.value
+        precondition(session.active && session.status == "On" && launches == 0)
+        let command = try await session.value(profile, "command")
+        precondition(command.contains("/tmp/test.sock"))
+        await session.check(profile, .english, closing: true)
+        precondition(!session.active && session.status == "Off")
+
+        refused = true
+        session.start(profile, .english)
+        await session.monitor?.value
+        precondition(session.terminalRetry && launches == 0)
+        session.start(profile, .english, interactive: true)
         await session.monitor?.value
         precondition(session.showDetails && session.lastError == "fixture public key was denied")
-        precondition(!session.pending && session.status.contains("42") && !manager.fileExists(atPath: directory!.path))
-        session.start(profile, .english)
+        precondition(!session.pending && !manager.fileExists(atPath: directory!.path))
+        session.start(profile, .english, interactive: true)
         await session.monitor?.value
-        precondition(session.active && session.status.contains("Copy command") && launches == 2)
-        session.start(profile, .english)
-        precondition(launches == 2)
-        await session.check(profile, .english, closing: true)
-        precondition(!session.active && !session.pending && session.status == "The socket is stopped.")
+        precondition(session.active && session.status == "On" && launches == 2)
+        active = false
+        await session.check(profile, .english)
+        precondition(!session.active && session.status == "Off")
         session.dispose()
-        print("Socket sheet opens offline, displays terminal failures, detects readiness, closes and cleans up")
+        print("Inline socket state detected quiet startup, terminal fallback, close and expiry")
     }
 
     @MainActor
@@ -203,10 +219,11 @@ struct TestProfileClicks {
         let command = String(decoding: try Client.run(selected.socket("command")), as: UTF8.self)
         precondition(path.hasPrefix("/tmp/") && path.hasSuffix(".sock"))
         precondition(command.contains(path) && command.contains("ProxyCommand=false") && command.contains(selected.destination))
-        precondition(!FileManager.default.fileExists(atPath: path), "opening the socket sheet must be offline")
+        precondition(!FileManager.default.fileExists(atPath: path), "reading socket information must be offline")
         for op in ["start", "check", "close"] {
             precondition(selected.socket(op) == ["socket", op, "--", "Second"])
         }
+        precondition(selected.socket("start", batch: true) == ["socket", "start", "--batch", "--", "Second"])
         let workspace = Workspace()
         let release = """
         {"current":"1.0.0","latest":"1.0.1","available":true,"release_url":"https://github.com/gadmin2151/sshi/releases/tag/v1.0.1","download_url":null}

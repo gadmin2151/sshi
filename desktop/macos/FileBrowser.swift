@@ -178,16 +178,14 @@ private final class FileBrowserModel: ObservableObject {
 @MainActor
 struct FileBrowser: View {
     @Environment(\.dismiss) private var dismiss
-    @ObservedObject var workspace: Workspace
     let profile: Profile
     let language: AppLanguage
     @StateObject private var model: FileBrowserModel
     @State private var localSelection = Set<String>()
     @State private var remoteSelection = Set<String>()
-    @State private var signIn = false
+    @StateObject private var login = SocketSession()
 
-    init(workspace: Workspace, profile: Profile, language: AppLanguage) {
-        self.workspace = workspace
+    init(profile: Profile, language: AppLanguage) {
         self.profile = profile
         self.language = language
         _model = StateObject(wrappedValue: FileBrowserModel(profile: profile, language: language))
@@ -202,8 +200,13 @@ struct FileBrowser: View {
                     Text(profile.name).font(.subheadline).foregroundColor(.secondary)
                 }
                 Spacer()
-                Button(language("Войти в терминале…", "Sign in via Terminal…")) { signIn = true }
-                    .disabled(model.busy)
+                Button(language("Войти в терминале…", "Sign in via Terminal…")) {
+                    if login.active {
+                        Task { await model.browse(.remote, path: model.remote?.path ?? "", reconnect: true) }
+                    } else {
+                        login.start(profile, language, interactive: true)
+                    }
+                }.disabled(model.busy || login.pending)
                 Button(language("Готово", "Done")) { dismiss() }
                     .keyboardShortcut(.cancelAction).disabled(model.busy)
             }.padding(15)
@@ -235,7 +238,8 @@ struct FileBrowser: View {
                     Text("\(progress.name) · \(ByteCountFormatter.string(fromByteCount: Int64(clamping: progress.bytes), countStyle: .file))")
                         .lineLimit(1)
                 } else {
-                    Text(model.status).lineLimit(3).textSelection(.enabled)
+                    Text(login.pending ? login.status : login.lastError.isEmpty ? model.status : login.lastError)
+                        .lineLimit(3).textSelection(.enabled)
                 }
             }.font(.callout).frame(maxWidth: .infinity, alignment: .leading).padding(12)
         }
@@ -245,11 +249,10 @@ struct FileBrowser: View {
             await model.browse(.local, path: "")
             if !Task.isCancelled { await model.browse(.remote, path: "") }
         }
-        .sheet(isPresented: $signIn, onDismiss: {
-            Task { await model.browse(.remote, path: model.remote?.path ?? "", reconnect: true) }
-        }) {
-            SocketSheet(workspace: workspace, profile: profile, language: language)
+        .onChange(of: login.active) { active in
+            if active { Task { await model.browse(.remote, path: model.remote?.path ?? "", reconnect: true) } }
         }
+        .onDisappear { login.dispose() }
     }
 }
 

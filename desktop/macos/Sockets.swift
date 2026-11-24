@@ -4,77 +4,99 @@ import Foundation
 import SwiftUI
 
 @MainActor
-struct SocketSheet: View {
-    @Environment(\.dismiss) private var dismiss
+struct SocketControls: View {
     @ObservedObject var workspace: Workspace
     let profile: Profile
     let language: AppLanguage
     @StateObject private var session = SocketSession()
-    @State private var copied = ""
-    @State private var confirmStop = false
-
-    private func field(_ title: String, _ value: String, _ copy: String) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title).font(.headline)
-            Text(value).font(.system(.body, design: .monospaced))
-                .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-            Button(copy) {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(value, forType: .string)
-                copied = language("Скопировано.", "Copied.")
-            }.disabled(value.isEmpty)
-        }
-    }
+    @State private var feedback = ""
+    @State private var confirming = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            VStack(alignment: .leading, spacing: 6) {
-                Text(language("SSH-сокет", "SSH control socket")).font(.title2.bold())
-                Text(profile.name).font(.headline)
-                Text(session.status).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 8) {
+                Text(language("SSH-сокет", "SSH control socket")).font(.headline)
+                Text(session.status.isEmpty ? language("Проверяем…", "Checking…") : session.status)
+                    .font(.caption.weight(.medium)).padding(.horizontal, 8).padding(.vertical, 3)
+                    .background(session.active ? Color.accentColor.opacity(0.19) : Color.secondary.opacity(0.12), in: Capsule())
             }
-            HStack {
-                Button(language("Запустить", "Start socket")) { session.start(profile, language) }
-                    .buttonStyle(.borderedProminent).disabled(session.active || session.pending)
-                Button(language("Проверить", "Check status")) { Task { await session.check(profile, language) } }
-                Button(language("Остановить…", "Stop socket…")) { confirmStop = true }.disabled(!session.active)
-            }.disabled(session.busy || session.command.isEmpty)
+            if confirming && session.active {
+                HStack {
+                    Button(language("Остановить", "Stop"), role: .destructive) {
+                        confirming = false
+                        Task { await session.check(profile, language, closing: true) }
+                    }
+                    Button(language("Отмена", "Cancel")) { confirming = false }
+                }.disabled(session.busy)
+                Text(language("Сеансы через этот сокет завершатся.", "Sessions using this socket will disconnect."))
+                    .font(.callout).foregroundColor(.secondary)
+            } else if session.active {
+                HStack {
+                    Button {
+                        copy("command")
+                    } label: { Label(language("Скопировать команду", "Copy command"), systemImage: "doc.on.doc") }
+                    Button(language("Путь", "Path")) { copy("path") }
+                        .help(language("Скопировать путь к сокету", "Copy socket path"))
+                    Button(language("Остановить…", "Stop socket…")) { confirming = true }
+                }.disabled(session.busy)
+            } else if !session.pending {
+                HStack {
+                    Button(language("Включить", "Enable")) { session.start(profile, language) }
+                        .buttonStyle(.borderedProminent)
+                    if session.terminalRetry {
+                        Button(language("Войти в терминале…", "Sign in via Terminal…")) {
+                            session.start(profile, language, interactive: true)
+                        }
+                    }
+                }.disabled(session.busy || session.status.isEmpty)
+            }
+            if !feedback.isEmpty {
+                Text(feedback).font(.callout).foregroundColor(.secondary)
+            }
             if !session.lastError.isEmpty {
                 DisclosureGroup(isExpanded: $session.showDetails) {
-                    ScrollView {
-                        Text(session.lastError).font(.system(.body, design: .monospaced)).textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }.frame(height: 76)
-                } label: { Text(language("Подробности последней ошибки", "Last error details")) }
-            }
-            Divider()
-            field(language("Путь на этом Mac", "Path on this Mac"), session.path, language("Скопировать путь", "Copy path"))
-            field(language("Команда SSH", "SSH command"), session.command, language("Скопировать команду", "Copy command"))
-            Text(language("По умолчанию сокет закрывается после 11 ч 40 мин без активных сеансов.",
-                          "By default, the socket closes after 11 hours and 40 minutes without an active session."))
-                .font(.callout).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
-            HStack {
-                Text(copied).foregroundColor(.secondary)
-                Spacer()
-                Button(language("Готово", "Done")) { dismiss() }.keyboardShortcut(.cancelAction)
+                    Text(session.lastError).font(.system(.callout, design: .monospaced)).textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } label: {
+                    Text(language("Ошибка сокета", "Socket error"))
+                }
             }
         }
-        .padding(24).frame(width: 510)
+        .padding(14).frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
         .task {
-            await session.open(profile, language)
-            if session.lastError.isEmpty { session.lastError = workspace.socketErrors[session.path] ?? "" }
+            if let error = workspace.socketErrors[profile] {
+                session.lastError = error
+                session.terminalRetry = true
+            }
+            await session.check(profile, language)
+            while !Task.isCancelled {
+                do { try await Task.sleep(nanoseconds: 5_000_000_000) }
+                catch { return }
+                if !session.pending { await session.check(profile, language) }
+            }
+        }
+        .onChange(of: session.active) { _ in
+            feedback = ""
+            confirming = false
         }
         .onChange(of: session.lastError) { value in
-            if !session.path.isEmpty && !value.isEmpty { workspace.socketErrors[session.path] = value }
+            workspace.socketErrors[profile] = value.isEmpty ? nil : value
         }
         .onDisappear { session.dispose() }
-        .alert(language("Остановить SSH-сокет?", "Stop this SSH control socket?"), isPresented: $confirmStop) {
-            Button(language("Отмена", "Cancel"), role: .cancel) {}
-            Button(language("Остановить", "Stop"), role: .destructive) {
-                Task { await session.check(profile, language, closing: true) }
+    }
+
+    private func copy(_ field: String) {
+        Task {
+            do {
+                let value = try await session.value(profile, field)
+                guard session.active else { return }
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(value, forType: .string)
+                feedback = language("Скопировано.", "Copied.")
+            } catch {
+                session.lastError = error.localizedDescription
             }
-        } message: {
-            Text(language("Сеансы, использующие этот сокет, будут закрыты.", "Sessions using this socket will disconnect."))
         }
     }
 }
@@ -83,20 +105,18 @@ struct SocketSheet: View {
 final class SocketSession: ObservableObject {
     typealias Run = (Profile, String) async throws -> String
     typealias Launch = (Profile, URL) async throws -> Void
-    @Published var path = ""
-    @Published var command = ""
     @Published var status = ""
     @Published var lastError = ""
     @Published var showDetails = false
     @Published var busy = false
     @Published var pending = false
     @Published var active = false
+    @Published var terminalRetry = false
     private(set) var monitor: Task<Void, Never>?
     private let run: Run
     private let launch: Launch
     private var report: URL?
     private var launchTime: TimeInterval?
-    private var disposed = false
 
     init(run: @escaping Run = SocketSession.output, launch: @escaping Launch = SocketSession.terminal) {
         self.run = run
@@ -105,30 +125,23 @@ final class SocketSession: ObservableObject {
 
     nonisolated static func output(_ profile: Profile, _ operation: String) async throws -> String {
         try await Task.detached(priority: .userInitiated) {
-            String(decoding: try Client.run(profile.socket(operation)), as: UTF8.self).trimmingCharacters(in: .newlines)
+            let args = operation == "batch" ? profile.socket("start", batch: true) : profile.socket(operation)
+            return String(decoding: try Client.run(args), as: UTF8.self).trimmingCharacters(in: .newlines)
         }.value
     }
 
     nonisolated static func terminal(_ profile: Profile, _ directory: URL) async throws {
         try await Task.detached(priority: .userInitiated) {
             let helper = Client.binary.deletingLastPathComponent().appendingPathComponent("sshi-socket-start")
-            try Client.terminal([directory.path, Client.binary.path, profile.name], hold: false, executable: helper)
+            try Client.terminal([directory.path, Client.binary.path, profile.name], hold: false, executable: helper, socketLogin: true)
         }.value
     }
 
-    func open(_ profile: Profile, _ language: AppLanguage) async {
-        status = language("Проверяем сокет…", "Checking socket…")
-        do {
-            path = try await run(profile, "path")
-            command = try await run(profile, "command")
-            await check(profile, language)
-        } catch {
-            if !disposed { fail(language("Не удалось прочитать параметры сокета.", "Could not read socket details."), error.localizedDescription) }
-        }
+    func value(_ profile: Profile, _ field: String) async throws -> String {
+        try await run(profile, field)
     }
 
     private func stopMonitoring() {
-        monitor?.cancel()
         monitor = nil
         pending = false
         launchTime = nil
@@ -139,47 +152,104 @@ final class SocketSession: ObservableObject {
     }
 
     func dispose() {
-        disposed = true
+        monitor?.cancel()
         stopMonitoring()
     }
 
-    private func fail(_ message: String, _ detail: String) {
+    private func setState(_ active: Bool, _ language: AppLanguage) {
+        self.active = active
+        status = active ? language("Включён", "On") : language("Выключен", "Off")
+        if active {
+            lastError = ""
+            terminalRetry = false
+        }
+    }
+
+    private func fail(_ detail: String, _ language: AppLanguage) {
         stopMonitoring()
-        status = message
-        lastError = detail.isEmpty ? message : detail
+        setState(false, language)
+        lastError = detail
         showDetails = true
+        terminalRetry = true
     }
 
-    func start(_ profile: Profile, _ language: AppLanguage) {
-        guard !disposed, !busy, !active, !pending, !command.isEmpty else { return }
+    func start(_ profile: Profile, _ language: AppLanguage, interactive: Bool = false) {
+        guard !busy, !active, !pending else { return }
+        pending = true
+        lastError = ""
+        showDetails = false
+        status = language("Включаем…", "Starting…")
+        if interactive {
+            startTerminal(profile, language)
+        } else {
+            monitor = Task {
+                do {
+                    _ = try await run(profile, "batch")
+                    guard !Task.isCancelled else { return }
+                    stopMonitoring()
+                    setState(true, language)
+                } catch {
+                    if !Task.isCancelled { fail(error.localizedDescription, language) }
+                }
+            }
+        }
+    }
+
+    private func startTerminal(_ profile: Profile, _ language: AppLanguage) {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("sshi-start-\(UUID().uuidString)")
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
                                                     attributes: [.posixPermissions: 0o700])
         } catch {
-            fail(language("Не удалось начать запуск.", "Could not start SSH."), error.localizedDescription)
+            fail(error.localizedDescription, language)
             return
         }
         report = directory
-        pending = true
-        showDetails = false
-        status = language("Открываем Терминал…", "Opening Terminal…")
+        status = language("Вход в Терминале…", "Signing in via Terminal…")
         monitor = Task {
             do {
-                // Initial macOS permission to control Terminal can take time.
                 try await launch(profile, directory)
                 guard !Task.isCancelled else { return }
                 launchTime = ProcessInfo.processInfo.systemUptime
                 let deadline = ProcessInfo.processInfo.systemUptime + 180
                 repeat {
-                    await check(profile, language)
-                    guard pending, !Task.isCancelled else { return }
+                    if let (code, detail) = try completion(language) {
+                        if code == 0 {
+                            stopMonitoring()
+                            setState(true, language)
+                        } else {
+                            fail(detail.isEmpty ? language("SSH завершился с кодом \(code).", "SSH exited with status \(code).") : detail, language)
+                        }
+                        return
+                    }
                     try await Task.sleep(nanoseconds: 1_000_000_000)
-                } while ProcessInfo.processInfo.systemUptime < deadline
-                status = language("Завершите вход в Терминале и нажмите «Проверить».",
-                                  "Finish signing in through Terminal, then select Check status.")
+                } while !Task.isCancelled && ProcessInfo.processInfo.systemUptime < deadline
+                if !Task.isCancelled {
+                    fail(language("Истекло время ожидания входа в Терминале.", "Timed out waiting for sign-in in Terminal."), language)
+                }
             } catch {
-                if !Task.isCancelled { fail(language("Не удалось открыть Терминал.", "Could not open Terminal."), error.localizedDescription) }
+                if !Task.isCancelled { fail(error.localizedDescription, language) }
+            }
+        }
+    }
+
+    func check(_ profile: Profile, _ language: AppLanguage, closing: Bool = false) async {
+        guard !busy, !pending else { return }
+        busy = true
+        if closing { status = language("Останавливаем…", "Stopping…") }
+        defer { busy = false }
+        do {
+            _ = try await run(profile, closing ? "close" : "check")
+            if !Task.isCancelled { setState(!closing, language) }
+        } catch {
+            guard !Task.isCancelled else { return }
+            let detail = error.localizedDescription
+            if detail.localizedCaseInsensitiveContains("no active ssh control socket") {
+                setState(false, language)
+            } else {
+                setState(active, language)
+                lastError = detail
+                showDetails = true
             }
         }
     }
@@ -210,43 +280,4 @@ final class SocketSession: ObservableObject {
         return nil
     }
 
-    func check(_ profile: Profile, _ language: AppLanguage, closing: Bool = false) async {
-        guard !disposed, !busy else { return }
-        busy = true
-        defer { busy = false }
-        // Snapshot the terminal result before checking the master, which may
-        // become ready between the check and the next poll.
-        let result: (Int, String)?
-        do { result = try completion(language) }
-        catch { fail(language("Не удалось прочитать результат SSH.", "Could not read the SSH result."), error.localizedDescription); return }
-        do {
-            _ = try await run(profile, closing ? "close" : "check")
-            guard !disposed else { return }
-            active = !closing
-            stopMonitoring()
-            status = active
-                ? language("Сокет готов. Нажмите «Скопировать команду» для Codex или другого терминала.",
-                           "The socket is ready. Select Copy command for Codex or another terminal.")
-                : language("Сокет остановлен.", "The socket is stopped.")
-        } catch {
-            guard !disposed else { return }
-            let detail = error.localizedDescription
-            let stopped = detail.localizedCaseInsensitiveContains("no active ssh control socket")
-            if stopped { active = false }
-            if let (code, diagnostic) = result {
-                let summary = code == 0
-                    ? language("SSH завершил запуск, но сокет недоступен.", "SSH finished starting, but the socket is unavailable.")
-                    : language("SSH завершился с кодом \(code).", "SSH exited with status \(code).")
-                fail(summary, diagnostic.isEmpty && !stopped ? detail : diagnostic)
-            } else if !stopped {
-                fail(closing ? language("Не удалось остановить сокет.", "Could not stop the socket.")
-                     : language("Не удалось проверить сокет.", "Could not check the socket."), detail)
-            } else if pending {
-                status = language("Ожидаем SSH. Если Терминал запросит пароль, введите его там.",
-                                  "Waiting for SSH. If Terminal asks for a password, enter it there.")
-            } else {
-                status = language("Сокет не запущен.", "The socket is stopped.")
-            }
-        }
-    }
 }

@@ -1,4 +1,4 @@
-.TH SSHI 1 "2026-11-23" "SSHI 0.3.0" "User Commands"
+.TH SSHI 1 "2026-11-23" "SSHI 0.3.1" "User Commands"
 .SH NAME
 sshi, sshi-copy-id, sshi-copy-iid \- use OpenSSH over an iroh relay
 .SH SYNOPSIS
@@ -121,10 +121,13 @@ SFTP subsystem. The subcommand
 .B cp
 has the same syntax.
 .TP
-.B socket start [\-\-persist TIME] PROFILE
+.B socket start [\-\-persist TIME] [\-\-batch] PROFILE
 Authenticate through the selected Iroh relay, then create a local OpenSSH control
 socket in a private directory under /tmp. Starting the same active master again
 returns its socket path. The default idle timeout is 700 minutes.
+Use
+.B \-\-batch
+to use the configured OpenSSH identity without interactive prompts.
 .TP
 .B socket path|command PROFILE
 Print the local socket path or a quoted shell command for connecting through it.

@@ -197,7 +197,18 @@ def smoke(base):
         assert command(control + ["check", "--", profile], tx, check=False).returncode != 0
         assert command(native + ["true"], tx, check=False).returncode != 0
         wait("socket broker shutdown", lambda: not (base / "tx/sshi/proxy.sock").exists(), timeout=15)
-        print("Managed socket survived terminal closure, reused one SSH login through Iroh, and closed cleanly", flush=True)
+        try:
+            # The GUI holds output pipes open and has no terminal for SSH prompts.
+            started = command(control + ["start", "--batch", "--persist", "1m", "--", profile], tx)
+            assert Path(started.stdout.decode().strip()) == path and path.is_socket()
+            assert command(native + ["id -un"], tx).stdout.decode().strip() == user
+        finally:
+            if path.is_socket():
+                command(control + ["close", "--", profile], tx)
+                wait("batch control socket removal", lambda: not path.exists(), timeout=10)
+            path.with_suffix(".lock").unlink(missing_ok=True)
+        wait("batch socket broker shutdown", lambda: not (base / "tx/sshi/proxy.sock").exists(), timeout=15)
+        print("Managed sockets survived terminal closure, started in batch mode, and closed cleanly", flush=True)
 
         payload = "SFTP test".encode() * 8192
         source = base / "mac send.bin"

@@ -4,13 +4,13 @@ use clap::Subcommand;
 use iroh_ssh::{profiles::Profile, shell_arg};
 use std::{
     fs::{self, File, OpenOptions},
-    io::ErrorKind,
+    io::{ErrorKind, Read, Seek, SeekFrom},
     os::unix::{
         fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt},
         net::UnixStream,
     },
     path::{Path, PathBuf},
-    process::{Command, Output},
+    process::{Command, Output, Stdio},
 };
 
 #[derive(Subcommand)]
@@ -23,6 +23,9 @@ pub enum Action {
     Start {
         #[arg(long, default_value = "700m")]
         persist: String,
+        /// Use the configured SSH key without requesting interactive input.
+        #[arg(long)]
+        batch: bool,
         profile: String,
     },
     /// Ask the local SSH master whether it is running.
@@ -168,7 +171,7 @@ pub fn run(action: Action) -> Result<()> {
             shell_arg(&path.to_string_lossy()),
             shell_arg(&dest)
         ),
-        Action::Start { persist, .. } => {
+        Action::Start { persist, batch, .. } => {
             verify_directory(&directory, uid, true)?;
             let _lock = lock(&path)?;
             if socket_exists(&path, uid)? {
@@ -186,13 +189,39 @@ pub fn run(action: Action) -> Result<()> {
                     ),
                 }
             }
-            let status = profiles::command(&profile)?
+            let mut process = profiles::command(&profile)?;
+            let diagnostics = if batch {
+                // ProxyCommand can inherit stderr before OpenSSH forks. Use a
+                // temporary file so its lifetime does not keep GUI pipes open.
+                let file = tempfile::tempfile().context("store SSH startup diagnostics")?;
+                process
+                    .arg("--batch-login")
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(file.try_clone()?);
+                Some(file)
+            } else {
+                None
+            };
+            let status = process
                 .args(["-f", "-M", "-N", "-S"])
                 .arg(&path)
                 .args(["-o", &format!("ControlPersist={persist}"), "--", &dest])
                 .status()
                 .context("start SSH master through Iroh")?;
-            ensure!(status.success(), "SSH master exited with {status}");
+            if !status.success() {
+                if let Some(mut file) = diagnostics {
+                    let offset = file.metadata()?.len().saturating_sub(4096);
+                    file.seek(SeekFrom::Start(offset))?;
+                    let mut tail = Vec::new();
+                    file.take(4096).read_to_end(&mut tail)?;
+                    let detail = String::from_utf8_lossy(&tail);
+                    if !detail.trim().is_empty() {
+                        bail!("{}", detail.trim());
+                    }
+                }
+                bail!("SSH master exited with {status}");
+            }
             let check = control(&path, &dest, "check")?;
             ensure!(
                 check.status.success(),

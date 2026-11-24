@@ -1,20 +1,15 @@
-# SSHI 0.3.0
+# SSHI 0.3.1
 
-## Передача файлов
+## SSH-сокет в карточке подключения
 
-- Выберите сохранённое подключение и нажмите **«Файлы»**. Слева показан ваш компьютер, справа — выбранный получатель. Перетащите файлы или папки в другую панель. Кнопки загрузки и скачивания позволяют выполнить то же действие с клавиатуры.
-- Поля пути, переход на уровень выше и обновление доступны с обеих сторон. Во время копирования виден прогресс. SSHI сохраняет существующий файл при совпадении имён.
-- CLI поддерживает `sshi --cp` и `sshi cp`, выбор ключа через `-i` и копирование папок через `-r`. Передача использует SFTP через обычный Iroh-маршрут.
-
-## Интерфейс
-
-- В Linux, macOS и Windows основные действия **«Терминал»** и **«Файлы»** теперь рядом. Настройки подключения и вспомогательные SSH-инструменты доступны в выбранном профиле.
-- На Linux и macOS при входе по паролю файловое окно предлагает воспользоваться терминалом. На Windows ввод и проверка отпечатка доступны в самом файловом окне.
+- В Linux и macOS статус сокета виден в основном окне выбранного профиля. Нажмите **«Включить»**, затем **«Скопировать команду»**. При входе по ключу сокет запускается в фоне.
+- Если SSH требует пароль или подтверждение отпечатка, приложение покажет кнопку **«Войти в терминале»**. Ошибки и подтверждение остановки выводятся в той же карточке.
+- CLI поддерживает `sshi socket start --batch PROFILE` для запуска в режиме OpenSSH BatchMode.
 
 ## English
 
-- Select a connection and open **Files** for a two-pane browser. Drag files or folders between your computer and the remote machine, or use Upload and Download.
-- Use `sshi --cp` or `sshi cp` from the terminal. The `-r` flag copies folders. Transfers use SFTP over Iroh and preserve files at conflicting destinations.
-- The Linux, macOS and Windows connection managers place the terminal and file browser actions together.
+- On Linux and macOS, turn on the SSH control socket directly in the selected connection’s card. The app shows its status and offers **Copy command** when it is ready.
+- Configured keys can start the socket in the background. If SSH needs interactive sign-in, the card offers a terminal and displays startup errors inline.
+- Use `sshi socket start --batch PROFILE` to start without interactive prompts in the CLI.
 
-[Руководство / Setup guide](https://github.com/gadmin2151/sshi/blob/v0.3.0/README.md)
+[Руководство / Setup guide](https://github.com/gadmin2151/sshi/blob/v0.3.1/README.md) · [Передача файлов в 0.3.0 / File transfer in 0.3.0](https://github.com/gadmin2151/sshi/releases/tag/v0.3.0)

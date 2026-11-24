@@ -272,6 +272,7 @@ struct TestProfileClicks {
         let application = NSApplication.shared
         application.setActivationPolicy(.regular)
         application.finishLaunching()
+        print("AppKit initialized")
         let window = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 650, height: 220),
                               styleMask: [.titled], backing: .buffered, defer: false)
         let workspace = Workspace()
@@ -289,17 +290,13 @@ struct TestProfileClicks {
         scroll.documentView = grid
         window.contentView!.addSubview(scroll)
         grid.update(profiles, selected: names[0])
+        print("Connection grid populated")
         window.makeKeyAndOrderFront(nil)
         application.activate(ignoringOtherApps: true)
         window.makeFirstResponder(grid)
 
         func drain(_ duration: TimeInterval) {
-            let end = Date(timeIntervalSinceNow: duration)
-            while Date() < end {
-                if let event = application.nextEvent(matching: .any, until: end, inMode: .default, dequeue: true) {
-                    application.sendEvent(event)
-                }
-            }
+            RunLoop.current.run(until: Date(timeIntervalSinceNow: duration))
         }
         var number = 0
         func click(_ index: Int, count: Int = 1) {
@@ -312,7 +309,7 @@ struct TestProfileClicks {
                                                timestamp: ProcessInfo.processInfo.systemUptime,
                                                windowNumber: window.windowNumber, context: nil,
                                                eventNumber: number, clickCount: count, pressure: 1)!
-                application.postEvent(event, atStart: false)
+                window.sendEvent(event)
             }
             drain(0.025)
         }

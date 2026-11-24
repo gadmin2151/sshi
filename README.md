@@ -6,7 +6,7 @@ SSH по публичному Iroh Endpoint ID. На Raspberry Pi, сервер�
 
 SSHI сохраняет именованные подключения, открывает несколько терминалов через один туннель и позволяет пригласить новый компьютер через Iroh. На Linux и macOS графический клиент и CLI используют одни настройки и профили.
 
-**[Скачать SSHI 0.5.1](https://github.com/gadmin2151/sshi/releases/tag/v0.5.1)** · [Первый вход](#первый-вход) · [Docker Compose](docs/docker.md) · [Сборка из исходников](docs/build.md)
+**[Скачать SSHI 0.5.1](https://github.com/gadmin2151/sshi/releases/tag/v0.5.1)** · [Установка в Linux](#linux) · [Подключение к relay](#подключение-к-relay) · [Первый вход](#первый-вход) · [Docker Compose](docs/docker.md) · [Сборка из исходников](docs/build.md)
 
 ![Графический клиент SSHI в Linux](docs/desktop-linux.png)
 
@@ -21,40 +21,56 @@ SSHI сохраняет именованные подключения, откр�
 | Windows x64 | `sshi-0.5.1-windows-x64.exe` | Запустите портативный EXE |
 | macOS 12+ на Apple Silicon | `sshi-0.5.1-macos-arm64.pkg` | Откройте установщик, затем SSHI в «Программах» |
 
-На Debian выполните в каталоге загрузки:
+### Linux
+
+Одна команда устанавливает или обновляет SSHI на Debian, Ubuntu, Raspberry Pi OS, Arch Linux, CachyOS и RPM-системах с DNF или Yum. Установщик выбирает пакет под архитектуру системы из последнего стабильного релиза и сверяет SHA-256. Запустите команду от `root` или пользователя с `sudo`.
 
 ```sh
-sudo apt install "./sshi_0.5.1_$(dpkg --print-architecture).deb"
-sshi --version
-man sshi
+sh -ec 'if ! command -v curl >/dev/null; then [ "$(id -u)" = 0 ] || set -- sudo; if command -v apt-get >/dev/null; then "$@" apt-get update; "$@" apt-get install -y ca-certificates curl; elif command -v pacman >/dev/null; then "$@" pacman -S --needed --noconfirm curl; else for pm in dnf dnf5 yum; do if command -v "$pm" >/dev/null; then "$@" "$pm" install -y ca-certificates curl; break; fi; done; fi; fi; f=$(mktemp /tmp/sshi-bootstrap.XXXXXXXX); trap "rm -f -- \"\$f\"" EXIT; curl -fsSL https://raw.githubusercontent.com/gadmin2151/sshi/main/packaging/install-linux.sh -o "$f"; sh "$f"'
 ```
 
-На сервере без рабочего стола добавьте к `apt install` параметр `--no-install-recommends`. Пакет для macOS устанавливает также `sshi`, `sshi-copy-id`, `sshi-copy-iid` в `/usr/local/bin`. Пакеты macOS и Windows распространяются без сертификата издателя. Для проверки загрузки сверьте SHA-256 с файлом `SHA256SUMS` этого выпуска. Если macOS запросит подтверждение издателя, следуйте [инструкции Apple по открытию загруженных приложений](https://support.apple.com/en-us/102445).
+Проверить версию в терминале можно командой `sshi --version`, открыть справку — `man sshi`. При ручной установке `.deb` на сервере без рабочего стола используйте `apt install --no-install-recommends`.
 
-## Первый вход
+Пакет для macOS устанавливает также `sshi`, `sshi-copy-id`, `sshi-copy-iid` в `/usr/local/bin`. Пакеты macOS и Windows распространяются без сертификата издателя. Для проверки загрузки сверьте SHA-256 с файлом `SHA256SUMS` этого выпуска. Если macOS запросит подтверждение издателя, следуйте [инструкции Apple по открытию загруженных приложений](https://support.apple.com/en-us/102445).
 
-**1. Настройте relay на обоих компьютерах.** Возьмите URL и, если нужен, токен у администратора relay. В графическом клиенте откройте настройки relay или профиль Windows. На Linux и macOS доступны команды:
+## Подключение к relay
+
+На клиенте и получателе укажите один и тот же URL. В пакетах SSHI по умолчанию задан `https://iroh1.cmon.systems/`. Для своего relay подставьте его URL в обе команды. Если требуется токен, возьмите его у администратора relay.
+
+**На клиенте Linux или macOS** настройте relay из своей учётной записи.
 
 ```sh
-sshi config set-relay https://relay.example.org/
-sshi config set-token
+sshi config set-relay https://iroh1.cmon.systems/
 sshi config show
 ```
 
-Замените адрес на действующий. Вторая команда запрашивает токен скрыто и нужна только для relay с авторизацией. Пакет использует системный URL из `/etc/sshi/config.toml`, пока пользователь не выберет свой. Для системной службы `sshid` выполните настройку relay на получателе от имени `root`.
+Для relay с авторизацией выполните `sshi config set-token` и введите токен в скрытом запросе. В окне SSHI эти параметры доступны в настройках relay. В Windows их можно указать в профиле подключения.
 
-**2. Запустите получателя.** На Debian установите `openssh-server`. На Linux с systemd включите системную службу и получите её Endpoint ID.
+**На получателе Linux с системной службой `sshid`** настройте relay от `root`. В сеансе `root` опустите `sudo`.
+
+```sh
+sudo sshi config set-relay https://iroh1.cmon.systems/
+sudo sshi config show
+```
+
+Для relay с авторизацией выполните `sudo sshi config set-token`. Если `sshid` уже запущен, после изменения настроек выполните `sudo systemctl restart sshid`. Для пользовательской службы или получателя на macOS настройте relay из учётной записи, которая запускает `sshi serve`.
+
+## Первый вход
+
+**1. Запустите получателя.** На Debian, Ubuntu и Raspberry Pi OS установите OpenSSH командой `sudo apt install openssh-server` и запустите его через `sudo systemctl enable --now ssh`. На RPM-системах установите `openssh-server` через DNF или Yum, в Arch используется пакет `openssh`. На этих системах запустите OpenSSH командой `sudo systemctl enable --now sshd`.
+
+На Linux с systemd включите `sshid` и получите Endpoint ID службы.
 
 ```sh
 sudo systemctl enable --now sshid
 sudo sshi id
 ```
 
-Служба `sshid` использует сохранённый Endpoint ID и настройки relay пользователя `root`. Для просмотра журнала выполните `sudo journalctl -u sshid -f`. Если получатель уже запущен от `root` как пользовательская служба, перед переходом остановите её командой `systemctl --user disable --now sshi` из сеанса `root`.
+Служба `sshid` использует сохранённый Endpoint ID и настройки relay пользователя `root`. Проверьте `sudo journalctl -u sshid -n 30 --no-pager`. В строке `Ready:` будут Endpoint ID получателя и URL relay. Если получатель уже запущен от `root` как пользовательская служба, перед переходом остановите её командой `systemctl --user disable --now sshi` из сеанса `root`.
 
 Для запуска с Endpoint ID другого пользователя выполните `sshi id` и `systemctl --user enable --now sshi` из его сеанса. На macOS включите «Удалённый вход» в настройках общего доступа и запустите `sshi serve` в терминале. Сохраните Endpoint ID получателя для подключения.
 
-**3. Откройте «Новое подключение → По приглашению» на Mac, Windows или Linux.** Если владелец сервера уже прислал два значения, вставьте **его Endpoint ID** в поле получателя и **выданный вам код** в поле приглашения. Введите имя реальной учётной записи SSH на сервере (например, `pi`). Можно выбрать удобное имя подключения. Подтвердите приглашение и откройте SSH.
+**2. Откройте «Новое подключение → По приглашению» на Mac, Windows или Linux.** Если владелец сервера уже прислал два значения, вставьте **его Endpoint ID** в поле получателя и **выданный вам код** в поле приглашения. Введите имя реальной учётной записи SSH на сервере (например, `pi`). Можно выбрать удобное имя подключения. Подтвердите приглашение и откройте SSH.
 
 ![Поле приглашения и отдельное поле Endpoint ID получателя в Linux](docs/first-invitation.png)
 
@@ -70,11 +86,13 @@ sshi invite "$CLIENT_ID" --share --user pi
 
 На Mac и Linux можно выдать приглашение на свой компьютер из графического интерфейса. Для Windows как клиента приглашение на удалённый сервер можно выпустить через уже разрешённое подключение к этому серверу.
 
-**Вход из CLI.** Для обычного входа достаточно одной команды. Если получатель ещё не разрешил ID вашего компьютера, SSHI покажет этот ID и прямо в терминале предложит вставить код или ссылку. Ввод скрыт. После принятия приглашения откроется обычный SSH-вход. Пустой Enter отменяет попытку.
+**Вход из CLI.** Для прямого доступа скопируйте вывод `sshi id` на клиенте. На получателе с `sshid` выполните `sudo sshi allow-client "$CLIENT_ID"`, подставив ID клиента. В команде подключения укажите имя SSH-пользователя на получателе и его Endpoint ID.
 
 ```sh
 sshi "user@$RECEIVER_ID"
 ```
+
+Если получатель ещё не разрешил ID вашего компьютера, SSHI покажет этот ID и прямо в терминале предложит вставить код или ссылку. Ввод скрыт. После принятия приглашения откроется обычный SSH-вход. Пустой Enter отменяет попытку.
 
 Чтобы принять приглашение отдельно, выполните `sshi invitation redeem` для ссылки или `sshi invitation redeem --endpoint "$RECEIVER_ID"` для кода. Вставьте приглашение в скрытый запрос. В скрипте передайте его в стандартный ввод команды `invitation redeem` до запуска SSH.
 

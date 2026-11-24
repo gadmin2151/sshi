@@ -1,4 +1,4 @@
-.TH SSHI 1 "2026-11-24" "SSHI 0.5.0" "User Commands"
+.TH SSHI 1 "2026-11-24" "SSHI 0.5.1" "User Commands"
 .SH NAME
 sshi, sshi-copy-id, sshi-copy-iid \- use OpenSSH over an iroh relay
 .SH SYNOPSIS
@@ -267,6 +267,12 @@ An empty allowlist denies incoming connections. The local user's outgoing
 connections also use the service while it is running.
 .B \-\-target
 overrides the local OpenSSH server address for this run.
+.sp
+On Linux, run
+.B systemctl enable \-\-now sshid
+as root to start the packaged system service at boot and now. The service uses
+root's Endpoint ID and relay settings. Restart it with
+.BR "systemctl restart sshid" .
 .SH OPTIONS
 .TP
 .BI \-i " file"

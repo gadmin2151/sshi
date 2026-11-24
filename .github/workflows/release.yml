@@ -68,6 +68,7 @@ jobs:
               test "$(sshi --version)" = "sshi $(pacman -Q sshi | cut -d" " -f2 | cut -d- -f1)"
               test -x /usr/bin/sshi-desktop
               test -f /usr/lib/systemd/user/sshi.service
+              test -f /usr/lib/systemd/system/sshid.service
               echo "# preserved by pacman" >> /etc/sshi/config.toml
               pacman --noconfirm -Udd "${pkg[0]}"
               grep -Fxq "# preserved by pacman" /etc/sshi/config.toml
@@ -81,6 +82,7 @@ jobs:
           cargo install --locked --version 1.5.0 --debug --features server iroh-relay
           sudo apt-get install -y xvfb gir1.2-gtk-3.0 python3-gi ./dist/*_amd64.deb
           sshi --version
+          systemd-analyze verify /usr/lib/systemd/system/sshid.service
           xvfb-run -a sshi-desktop --smoke-test
           for test in profile_clicks gtk_forward gtk_invitation gtk_files; do
             if ! xvfb-run -a /usr/bin/python3 "tests/$test.py" /usr/bin/sshi > "$RUNNER_TEMP/gtk-test.log" 2>&1; then

@@ -68,6 +68,7 @@ install -Dm 644 "$packaging/../assets/windows/sshi-logo.png" "$staging/usr/share
 install -Dm 644 "$packaging/../LICENSE" "$staging/usr/share/doc/sshi/copyright"
 install -Dm 644 "$packaging/config.toml" "$staging/etc/sshi/config.toml"
 install -Dm 644 "$packaging/sshi.service" "$staging/usr/lib/systemd/user/sshi.service"
+install -Dm 644 "$packaging/sshid.service" "$staging/usr/lib/systemd/system/sshid.service"
 gzip -n -9 -c "$packaging/sshi.1" > "$staging/usr/share/man/man1/sshi.1.gz"
 chmod 644 "$staging/usr/share/man/man1/sshi.1.gz"
 ln -s sshi.1.gz "$staging/usr/share/man/man1/sshi-compi-id.1.gz"

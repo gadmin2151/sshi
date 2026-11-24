@@ -28,7 +28,7 @@ arch=('x86_64')
 url='https://github.com/gadmin2151/sshi'
 license=('MIT')
 depends=("glibc>=${_glibc}" 'libgcc' 'openssh' 'ca-certificates' 'gtk3' 'python-gobject')
-optdepends=('man-db: read the SSHI manual' 'systemd: run the per-user receiver')
+optdepends=('man-db: read the SSHI manual' 'systemd: run the SSHI receiver as a service')
 backup=('etc/sshi/config.toml')
 options=('!debug' '!strip' '!zipman')
 source=("sshi_${pkgver}_amd64.deb")

@@ -1,15 +1,15 @@
-# SSHI 0.5.0
+# SSHI 0.5.1
 
-## Новый интерфейс подключений
+## Системная служба в Linux
 
-- На Linux, macOS и Windows сохранённые подключения отображаются в адаптивной сетке карточек. Поиск работает по имени, SSH-логину и Endpoint ID.
-- Нижняя панель выбранного профиля показывает Endpoint ID и relay. Из неё можно скопировать полный ID, открыть файлы или запустить терминал в отдельном окне.
-- Редактирование профиля, заметки, приглашения, установка SSH-ключа и проброс портов доступны через меню **«Действия»**.
+- Пакеты Debian, RPM и Arch включают `sshid.service`. Служба использует Endpoint ID и настройки relay пользователя `root`.
+- Включите службу командой `sudo systemctl enable --now sshid`. Для перезапуска используйте `sudo systemctl restart sshid`, для просмотра журнала — `sudo journalctl -u sshid`.
+- Если `root` уже запустил получатель как пользовательскую службу `sshi`, остановите её перед запуском `sshid`.
 
-## Redesigned connection manager
+## System service on Linux
 
-- Saved connections appear in a responsive card grid on Linux, macOS, and Windows. Search by profile name, SSH username, or Endpoint ID.
-- The selected profile’s bottom panel shows its Endpoint ID and relay. Copy the full ID, open files, or launch a separate terminal window from the panel.
-- The **Actions** menu contains profile editing, notes, invitations, SSH key installation, and port forwarding.
+- Debian, RPM, and Arch packages include `sshid.service`. It uses root’s Endpoint ID and relay settings.
+- Enable and start the service with `sudo systemctl enable --now sshid`. Restart it with `sudo systemctl restart sshid` and view its logs with `sudo journalctl -u sshid`.
+- If root is already running the receiver as the `sshi` user service, stop that service before starting `sshid`.
 
-[Руководство / Setup guide](https://github.com/gadmin2151/sshi/blob/v0.5.0/README.md)
+[Руководство / Setup guide](https://github.com/gadmin2151/sshi/blob/v0.5.1/README.md)

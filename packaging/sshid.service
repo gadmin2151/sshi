@@ -1,0 +1,14 @@
+[Unit]
+Description=SSHI receiver for OpenSSH over an Iroh relay
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=exec
+User=root
+ExecStart=/usr/bin/sshi serve
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

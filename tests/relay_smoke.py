@@ -229,7 +229,8 @@ assert b"iroh relay" in check(run(["man", "-P", "cat", "sshi"]), "render install
 conffiles = check(run(["dpkg-query", "-W", "-f=${Conffiles}", "sshi"]), "package conffiles")
 assert b"/etc/sshi/config.toml" in conffiles
 assert pathlib.Path("/usr/lib/systemd/user/sshi.service").is_file()
-print("Debian apt install, man sshi and configurable /etc conffile: pass", flush=True)
+assert pathlib.Path("/usr/lib/systemd/system/sshid.service").is_file()
+print("Debian apt install, man sshi, configurable /etc conffile and systemd units: pass", flush=True)
 
 with tempfile.TemporaryDirectory(prefix="sshi.") as tmp:
     base = pathlib.Path(tmp)

@@ -5,7 +5,7 @@ enum AppLanguage: String, CaseIterable {
     case english = "en"
 
     static let preferenceKey = "interfaceLanguage"
-    static let releaseNotes = URL(string: "https://github.com/gadmin2151/sshi/releases/tag/v0.5.0")!
+    static let releaseNotes = URL(string: "https://github.com/gadmin2151/sshi/releases/tag/v0.5.1")!
 
     static func current(in defaults: UserDefaults = .standard) -> Self {
         defaults.string(forKey: preferenceKey).flatMap(Self.init(rawValue:)) ?? .russian
@@ -15,7 +15,7 @@ enum AppLanguage: String, CaseIterable {
         self == .english ? english : russian
     }
 
-    var whatsNew: String { self("Что нового в 0.5.0", "What’s new in 0.5.0") }
+    var whatsNew: String { self("Что нового в 0.5.1", "What’s new in 0.5.1") }
 
     func commandError(_ detail: String) -> String {
         let message = detail.lowercased()

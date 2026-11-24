@@ -26,6 +26,7 @@ tar xf "%{SOURCE0}" -C "%{buildroot}"
 %dir /etc/sshi
 %config(noreplace) /etc/sshi/config.toml
 /usr/bin/sshi*
+/usr/lib/systemd/system/sshid.service
 /usr/lib/systemd/user/sshi.service
 /usr/share/applications/sshi.desktop
 /usr/share/pixmaps/sshi.png

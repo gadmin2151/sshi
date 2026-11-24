@@ -26,6 +26,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Copy files over SSH and Iroh using SFTP.
+    #[command(long_flag = "cp")]
+    Cp(iroh_ssh::file_transfer::CopyArgs),
     /// Check the latest stable GitHub release and show the package for this system.
     Update {
         #[arg(long)]
@@ -134,6 +137,39 @@ pub fn run(arguments: &[OsString]) -> i32 {
 
 fn execute(cli: Cli, interactive: bool) -> Result<()> {
     let operation = match cli.command {
+        Command::Cp(args) => {
+            let store = Store::open()?;
+            let (name, transfer) = args.transfer()?;
+            let target = Target {
+                destination: name.into(),
+                identity: args
+                    .identity
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().into_owned()),
+            };
+            let profile = profile(&store, target)?;
+            return run_async(async {
+                let session = terminal::open_files(
+                    &store,
+                    &profile,
+                    terminal::LoginInput::Console(interactive),
+                )
+                .await?;
+                let count = iroh_ssh::file_transfer::copy(
+                    &session.sftp,
+                    transfer,
+                    args.recursive,
+                    iroh_ssh::file_transfer::print_progress,
+                )
+                .await?;
+                session.sftp.close().await?;
+                eprintln!(
+                    "{}",
+                    tr_format!("Скопировано файлов — {count}", "Files copied — {count}")
+                );
+                Ok(())
+            });
+        }
         Command::Update { json } => return run_async(iroh_ssh::update::print_check(json)),
         Command::Local(operation) => operation,
     };

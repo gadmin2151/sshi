@@ -103,15 +103,8 @@ fn control(path: &Path, dest: &str, op: &str) -> Result<Output> {
         .context("run OpenSSH control command")
 }
 
-pub fn run(action: Action) -> Result<()> {
-    let name = match &action {
-        Action::Path { profile }
-        | Action::Command { profile }
-        | Action::Start { profile, .. }
-        | Action::Check { profile }
-        | Action::Close { profile } => profile,
-    };
-    let mut profile = profiles::lookup(name)?;
+fn resolve(profile: &Profile) -> Result<Profile> {
+    let mut profile = profile.clone();
     let relay = if profile.relay.is_empty() {
         Config::load()?.default_relay()?.unwrap_or_default()
     } else {
@@ -120,11 +113,54 @@ pub fn run(action: Action) -> Result<()> {
     if !relay.is_empty() {
         profile.relay = iroh_ssh::relay_url(&relay)?.to_string();
     }
-    let dest = profile.destination();
+    Ok(profile)
+}
+
+fn managed_path(profile: &Profile) -> Result<(PathBuf, PathBuf, u32)> {
     // geteuid takes no arguments and has no failure mode.
     let uid = unsafe { libc::geteuid() };
     let directory = PathBuf::from(format!("/tmp/sshi-{uid}"));
-    let path = socket_path(&directory, &profile, &State::load()?.key());
+    let path = socket_path(&directory, profile, &State::load()?.key());
+    Ok((directory, path, uid))
+}
+
+pub fn existing(profile: &Profile) -> Result<Option<PathBuf>> {
+    let profile = resolve(profile)?;
+    let (directory, path, uid) = managed_path(&profile)?;
+    match verify_directory(&directory, uid, false) {
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|e| e.kind() == ErrorKind::NotFound) =>
+        {
+            Ok(None)
+        }
+        result => {
+            result?;
+            if socket_exists(&path, uid)?
+                && control(&path, &profile.destination(), "check")?
+                    .status
+                    .success()
+            {
+                Ok(Some(path))
+            } else {
+                Ok(None)
+            }
+        }
+    }
+}
+
+pub fn run(action: Action) -> Result<()> {
+    let name = match &action {
+        Action::Path { profile }
+        | Action::Command { profile }
+        | Action::Start { profile, .. }
+        | Action::Check { profile }
+        | Action::Close { profile } => profile,
+    };
+    let profile = resolve(&profiles::lookup(name)?)?;
+    let dest = profile.destination();
+    let (directory, path, uid) = managed_path(&profile)?;
     match action {
         Action::Path { .. } => println!("{}", path.display()),
         Action::Command { .. } => println!(

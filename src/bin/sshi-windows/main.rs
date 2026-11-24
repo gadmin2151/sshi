@@ -5,6 +5,8 @@ mod broker;
 #[cfg(windows)]
 mod cli;
 #[cfg(windows)]
+mod file_window;
+#[cfg(windows)]
 mod forward_dialog;
 #[cfg(windows)]
 mod join_dialog;
@@ -48,6 +50,10 @@ fn main() {
             )?;
             let store = store::Store::open()?;
             iroh_ssh::run_async(terminal::proxy(&store, &profile))
+        }
+        Some("--files") => {
+            let profile = toml::from_str(&env::var(SESSION_ENV).context("missing file profile")?)?;
+            file_window::show(store::Store::open()?, profile)
         }
         Some("--id") => {
             println!("{}", store::Store::open()?.identity()?.public());

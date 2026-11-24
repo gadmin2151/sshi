@@ -48,9 +48,9 @@ use crate::{
     terminal::default_relay,
 };
 
-const WIDTH: i32 = 852;
-const HEIGHT: i32 = 556;
-const HEADER: u32 = 0x322315;
+const WIDTH: i32 = 930;
+const HEIGHT: i32 = 600;
+const HEADER: u32 = 0x393219;
 const PAPER: u32 = 0x00ff_ffff;
 const DIM: u32 = 0x006e_5b46;
 const APP_ICON_RESOURCE: usize = 1;
@@ -78,6 +78,7 @@ const EMPTY_JOIN: u16 = 119;
 const MANUAL: u16 = 120;
 const CHECK_UPDATES: u16 = 121;
 const OPEN_UPDATE: u16 = 122;
+const FILES: u16 = 123;
 const UPDATE_TIMER: usize = 1;
 const UPDATE_RESULT_TIMER: usize = 2;
 const UPDATE_INTERVAL_MS: u32 = 6 * 60 * 60 * 1000;
@@ -480,16 +481,16 @@ impl View {
         self.controls.title = self.label(hwnd, "sshi", [74, 16, 83, 40])?;
         unsafe { SendMessageW(self.controls.title, WM_SETFONT, self.title_font as usize, 1) };
         self.controls.caption = self.label(hwnd, "SSH через iroh", [162, 28, 240, 23])?;
-        self.controls.update = self.button(hwnd, "", [414, 20, 273, 32], OPEN_UPDATE)?;
+        self.controls.update = self.button(hwnd, "", [486, 20, 273, 32], OPEN_UPDATE)?;
         unsafe { ShowWindow(self.controls.update, SW_HIDE) };
-        self.button(hwnd, "Папка данных", [698, 20, 132, 32], OPEN_DATA)?;
+        self.button(hwnd, "Папка данных", [772, 20, 134, 32], OPEN_DATA)?;
 
         self.label(hwnd, "Подключения", [22, 92, 236, 23])?;
         self.controls.list = self.control(
             hwnd,
             "SysListView32",
             "",
-            [22, 124, 236, 351],
+            [22, 124, 236, 394],
             LIST,
             WS_TABSTOP
                 | LVS_REPORT
@@ -524,21 +525,25 @@ impl View {
         self.controls.empty_manual =
             self.button(hwnd, "Ввести вручную…", [29, 269, 219, 30], MANUAL)?;
         self.show_empty_state();
-        self.button(hwnd, "Новое", [22, 490, 110, 29], NEW)?;
-        self.button(hwnd, "Удалить", [148, 490, 110, 29], DELETE)?;
+        self.button(hwnd, "Новое", [22, 533, 110, 29], NEW)?;
+        self.button(hwnd, "Удалить", [148, 533, 110, 29], DELETE)?;
 
-        self.label(hwnd, "Название подключения", [288, 92, 526, 20])?;
-        self.controls.name = self.edit(hwnd, [288, 115, 542, 27], 0)?;
-        self.label(hwnd, "Пользователь", [288, 154, 126, 20])?;
-        self.label(hwnd, "Endpoint ID получателя", [418, 154, 412, 20])?;
-        self.controls.user = self.edit(hwnd, [288, 177, 116, 27], 0)?;
-        self.controls.endpoint = self.edit(hwnd, [418, 177, 412, 27], 0)?;
-        self.label(hwnd, "URL relay", [288, 216, 542, 20])?;
+        let title = self.label(hwnd, "Название подключения", [291, 88, 526, 24])?;
+        let title_font = self.font;
+        unsafe { SendMessageW(title, WM_SETFONT, title_font as usize, 1) };
+        self.controls.name = self.edit(hwnd, [291, 127, 328, 30], 0)?;
+        self.button(hwnd, "Терминал", [641, 126, 124, 32], CONNECT)?;
+        self.button(hwnd, "Файлы", [778, 126, 128, 32], FILES)?;
+        self.label(hwnd, "Пользователь", [291, 175, 128, 20])?;
+        self.label(hwnd, "Endpoint ID получателя", [434, 175, 472, 20])?;
+        self.controls.user = self.edit(hwnd, [291, 198, 129, 27], 0)?;
+        self.controls.endpoint = self.edit(hwnd, [434, 198, 472, 27], 0)?;
+        self.label(hwnd, "URL relay", [291, 235, 615, 20])?;
         self.controls.relay = self.control(
             hwnd,
             "EDIT",
             "",
-            [288, 239, 542, 27],
+            [291, 258, 615, 27],
             RELAY_EDIT,
             WS_TABSTOP | ES_AUTOHSCROLL as u32,
             WS_EX_CLIENTEDGE,
@@ -552,31 +557,30 @@ impl View {
                 hint.as_ptr() as LPARAM,
             )
         };
-        self.label(hwnd, "Токен relay (если требуется)", [288, 278, 542, 20])?;
-        self.controls.token = self.edit(hwnd, [288, 301, 542, 27], ES_PASSWORD as u32)?;
-        self.label(hwnd, "Файл SSH-ключа (необязательно)", [288, 340, 542, 20])?;
-        self.controls.ssh_key = self.edit(hwnd, [288, 363, 424, 27], 0)?;
-        self.button(hwnd, "Выбрать…", [723, 363, 107, 27], BROWSE)?;
-        self.label(hwnd, "Мой Endpoint ID", [288, 402, 542, 20])?;
-        self.controls.my_id = self.edit(hwnd, [288, 425, 424, 27], ES_READONLY as u32)?;
-        self.button(hwnd, "Копировать", [723, 425, 107, 27], COPY)?;
-        self.button(hwnd, "Ввести приглашение…", [288, 459, 168, 26], ENROLL)?;
+        self.label(hwnd, "Токен relay (если требуется)", [291, 295, 615, 20])?;
+        self.controls.token = self.edit(hwnd, [291, 318, 615, 27], ES_PASSWORD as u32)?;
+        self.label(hwnd, "Файл SSH-ключа (необязательно)", [291, 355, 615, 20])?;
+        self.controls.ssh_key = self.edit(hwnd, [291, 378, 496, 27], 0)?;
+        self.button(hwnd, "Выбрать…", [799, 378, 107, 27], BROWSE)?;
+        self.label(hwnd, "Мой Endpoint ID", [291, 417, 615, 20])?;
+        self.controls.my_id = self.edit(hwnd, [291, 440, 496, 27], ES_READONLY as u32)?;
+        self.button(hwnd, "Копировать", [799, 440, 107, 27], COPY)?;
+        self.button(hwnd, "Ввести приглашение…", [291, 480, 198, 28], ENROLL)?;
         self.button(
             hwnd,
             "Добавить SSH-ключ…",
-            [468, 459, 176, 26],
+            [499, 480, 193, 28],
             INSTALL_SSH_KEY,
         )?;
         self.button(
             hwnd,
             "Создать приглашение…",
-            [656, 459, 174, 26],
+            [703, 480, 203, 28],
             ISSUE_INVITE,
         )?;
-        self.button(hwnd, "Проброс портов…", [288, 490, 169, 29], FORWARD)?;
-        self.button(hwnd, "Сохранить", [552, 490, 125, 29], SAVE)?;
-        self.button(hwnd, "Подключиться", [690, 490, 140, 29], CONNECT)?;
-        self.controls.status = self.label(hwnd, "", [22, 528, 808, 20])?;
+        self.button(hwnd, "Проброс портов…", [291, 533, 199, 29], FORWARD)?;
+        self.button(hwnd, "Сохранить", [761, 533, 145, 29], SAVE)?;
+        self.controls.status = self.label(hwnd, "", [22, 571, 883, 20])?;
         set_text(self.controls.my_id, &self.id.to_string());
         if self.profiles.is_empty() {
             self.new_profile();
@@ -625,15 +629,13 @@ impl View {
         unsafe { SendMessageW(result, WM_SETFONT, self.font as usize, 1) };
         let horizontal = match id {
             OPEN_DATA | BROWSE | COPY | ENROLL | INSTALL_SSH_KEY | ISSUE_INVITE | SAVE
-            | CONNECT | FORWARD | OPEN_UPDATE => Anchor::End,
+            | CONNECT | FILES | FORWARD | OPEN_UPDATE => Anchor::End,
             _ if is_edit && rect[2] >= 400 => Anchor::Stretch,
             _ => Anchor::Start,
         };
         let vertical = match id {
             LIST => Anchor::Stretch,
-            NEW | DELETE | ENROLL | INSTALL_SSH_KEY | ISSUE_INVITE | SAVE | CONNECT | FORWARD => {
-                Anchor::End
-            }
+            NEW | DELETE | ENROLL | INSTALL_SSH_KEY | ISSUE_INVITE | SAVE | FORWARD => Anchor::End,
             _ if rect[1] >= 528 => Anchor::End,
             _ => Anchor::Start,
         };
@@ -913,6 +915,7 @@ impl View {
             DELETE => self.delete(hwnd)?,
             SAVE => self.save()?,
             CONNECT => self.connect()?,
+            FILES => self.spawn_terminal("--files")?,
             INSTALL_SSH_KEY => self.spawn_terminal("--copy-ssh-key")?,
             ISSUE_INVITE => {
                 if text(self.controls.endpoint).trim().is_empty() {

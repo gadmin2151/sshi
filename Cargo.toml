@@ -1,6 +1,6 @@
 [package]
 name = "iroh-ssh"
-version = "0.2.5"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.91"
 default-run = "iroh-ssh"
@@ -11,17 +11,19 @@ blake3 = "1"
 clap = { version = "4", features = ["derive", "env"] }
 iroh = { version = "1.5.0", default-features = false, features = ["tls-ring"] }
 percent-encoding = "2"
+rand = "0.10"
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
+russh-sftp = "3"
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
-tokio = { version = "1", features = ["io-std", "io-util", "macros", "net", "rt", "signal", "sync", "time"] }
+tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt", "signal", "sync", "time"] }
 toml = "1"
 
 [features]
-windows-client = ["dep:embed-resource", "dep:rand", "dep:russh", "dep:windows-sys"]
+windows-client = ["dep:embed-resource", "dep:russh", "dep:windows-sys"]
 
 [build-dependencies]
 embed-resource = { version = "3", optional = true }
@@ -37,7 +39,6 @@ path = "src/bin/sshi-windows/main.rs"
 required-features = ["windows-client"]
 
 [target.'cfg(windows)'.dependencies]
-rand = { version = "0.10", optional = true }
 russh = { version = "0.65.4", default-features = false, features = ["ring", "rsa", "flate2"], optional = true }
 windows-sys = { version = "0.61", optional = true, features = [
     "Win32_Foundation",

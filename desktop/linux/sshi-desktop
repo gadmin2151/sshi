@@ -29,7 +29,7 @@ if not os.path.isfile(SSHI):
     SSHI = shutil.which("sshi") or "sshi"
 
 LANGUAGE_FILE = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "sshi/desktop-language"
-RELEASE_URL = "https://github.com/gadmin2151/sshi/releases/tag/v0.2.5"
+RELEASE_URL = "https://github.com/gadmin2151/sshi/releases/tag/v0.3.0"
 
 
 def read_language():
@@ -96,7 +96,15 @@ STYLE = b"""
 .sshi-detail { padding: 30px; }
 .sshi-sidebar { padding: 14px; }
 .sshi-row { padding: 8px 5px; }
-.sshi-primary { padding: 7px 16px; font-weight: bold; }
+.sshi-primary { padding: 8px 16px; font-weight: bold; }
+.sshi-secondary { padding: 8px 16px; font-weight: bold; }
+.sshi-title-card { padding: 19px; border-radius: 12px; border: 1px solid alpha(#16736c, 0.32); background-color: alpha(#16736c, 0.08); }
+.sshi-title-card .sshi-profile-icon { padding: 11px; }
+.file-toolbar, .file-pane-bar, .file-footer { padding: 10px 13px; background-color: alpha(@theme_fg_color, 0.035); border-bottom: 1px solid alpha(@theme_fg_color, 0.12); }
+.file-pane-title { color: @theme_fg_color; }
+.file-pane { border: 1px solid alpha(@theme_fg_color, 0.11); }
+.file-footer { border-top: 1px solid alpha(@theme_fg_color, 0.12); border-bottom: none; }
+.file-window treeview { -GtkTreeView-vertical-separator: 8px; }
 """
 
 def styled(widget, *classes):
@@ -482,6 +490,247 @@ class ControlSocketDialog(Gtk.Dialog):
             self.status.set_text(tr("Ожидаем SSH. Если терминал запросит пароль, введите его там.",
                                     "Waiting for SSH. If the terminal asks for a password, enter it there."))
 
+
+class FilePane:
+    def __init__(self, window, side, title):
+        self.side = side
+        self.path = None
+        self.parent = None
+        self.entries = {}
+        self.widget = styled(box(True, 0), "file-pane")
+        bar = styled(box(True, 7), "file-pane-bar")
+        self.widget.pack_start(bar, False, False, 0)
+        bar.add(label(title, "sshi-section", "file-pane-title"))
+        row = box(False, 5)
+        self.path_field = Gtk.Entry()
+        self.path_field.set_placeholder_text(tr("Путь к папке", "Folder path"))
+        self.path_field.get_accessible().set_name(title)
+        self.path_field.connect("activate", lambda entry: window.browse(side, entry.get_text()))
+        self.up = action("", lambda: window.browse(side, self.parent), "go-up-symbolic")
+        self.up.set_tooltip_text(tr("На уровень выше", "Parent folder"))
+        refresh = action("", lambda: window.browse(side, self.path or "", reconnect=side == "remote"),
+                         "view-refresh-symbolic")
+        refresh.set_tooltip_text(tr("Обновить", "Refresh"))
+        row.pack_start(self.up, False, False, 0)
+        row.pack_start(self.path_field, True, True, 0)
+        row.pack_start(refresh, False, False, 0)
+        bar.add(row)
+        self.rows = Gtk.ListStore(str, str, str, str, str)
+        self.tree = Gtk.TreeView(model=self.rows)
+        self.tree.set_enable_search(True)
+        self.tree.set_search_column(1)
+        self.tree.get_selection().set_mode(Gtk.SelectionMode.MULTIPLE)
+        self.tree.get_selection().connect("changed", lambda *_: window.controls())
+        name = Gtk.TreeViewColumn(tr("Имя", "Name"))
+        name.pack_start(icon := Gtk.CellRendererPixbuf(), False)
+        name.add_attribute(icon, "icon-name", 0)
+        name.pack_start(text := Gtk.CellRendererText(), True)
+        name.add_attribute(text, "text", 1)
+        name.set_expand(True)
+        name.set_resizable(True)
+        self.tree.append_column(name)
+        size = Gtk.CellRendererText(xalign=1)
+        self.tree.append_column(Gtk.TreeViewColumn(tr("Размер", "Size"), size, text=2))
+        self.tree.connect("row-activated", lambda _tree, path, _column: self.open(window, path))
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        scroll.add(self.tree)
+        self.widget.pack_start(scroll, True, True, 0)
+        target = [Gtk.TargetEntry.new("application/x-sshi-pane-selection", Gtk.TargetFlags.SAME_APP, 1)]
+        self.tree.drag_source_set(Gdk.ModifierType.BUTTON1_MASK, target, Gdk.DragAction.COPY)
+        self.tree.drag_dest_set(Gtk.DestDefaults.ALL, target, Gdk.DragAction.COPY)
+        self.tree.connect("drag-data-get", self.drag_data)
+        self.tree.connect("drag-data-received", window.drop, side)
+
+    def replace(self, listing):
+        self.path = listing["path"]
+        self.parent = listing["parent"]
+        self.path_field.set_text(self.path)
+        self.rows.clear()
+        self.entries = {entry["name"]: entry for entry in listing["entries"]}
+        for entry in self.entries.values():
+            kind, name, size = entry["kind"], entry["name"], entry["size"]
+            icon = {"directory": "folder-symbolic", "file": "text-x-generic-symbolic"}.get(kind, "emblem-symbolic-link-symbolic")
+            self.rows.append((icon, self.visible(name), "" if size is None else GLib.format_size(size), name, kind))
+
+    @staticmethod
+    def visible(value):
+        return "".join(c if c.isprintable() else "\ufffd" for c in value)
+
+    def selected(self):
+        model, paths = self.tree.get_selection().get_selected_rows()
+        return [model[path][3] for path in paths if model[path][4] in ("file", "directory")]
+
+    def open(self, window, index):
+        row = self.rows[index]
+        if row[4] == "directory" and self.path:
+            window.browse(self.side, os.path.join(self.path, row[3]))
+
+    def drag_data(self, _tree, _context, selection, _info, _time):
+        selection.set(selection.get_target(), 8, json.dumps(self.selected(), ensure_ascii=False).encode("utf-8"))
+
+
+class FileWindow(Gtk.Window):
+    def __init__(self, owner, profile):
+        super().__init__(title=tr("Файлы SSHI", "SSHI files"), transient_for=owner)
+        self.set_default_size(980, 610)
+        self.set_destroy_with_parent(True)
+        self.profile = profile
+        self.owner = owner
+        self.worker = None
+        self.busy = False
+        self.closing = False
+        self.widgets_ready = False
+        header = Gtk.HeaderBar(title=tr("Файлы", "Files"), subtitle=profile["name"], show_close_button=True)
+        self.set_titlebar(header)
+        sign_in = action(tr("Войти в терминале…", "Sign in via terminal…"), self.sign_in, "utilities-terminal-symbolic")
+        header.pack_end(sign_in)
+        self.sign_in_button = sign_in
+        body = styled(box(True, 0), "file-window")
+        self.add(body)
+        tools = styled(box(False, 8), "file-toolbar")
+        self.upload = action(tr("Загрузить →", "Upload →"), lambda: self.copy("local"))
+        self.download = action(tr("← Скачать", "← Download"), lambda: self.copy("remote"))
+        tools.pack_start(self.upload, False, False, 0)
+        tools.pack_start(self.download, False, False, 0)
+        hint = label(tr("Перетащите файлы в соседнюю панель", "Drag files to the other pane"), "dim-label")
+        tools.pack_end(hint, False, False, 0)
+        body.pack_start(tools, False, False, 0)
+        panels = Gtk.Paned.new(Gtk.Orientation.HORIZONTAL)
+        self.panes = {
+            "local": FilePane(self, "local", tr("Этот компьютер", "This computer")),
+            "remote": FilePane(self, "remote", profile["name"]),
+        }
+        panels.pack1(self.panes["local"].widget, True, False)
+        panels.pack2(self.panes["remote"].widget, True, False)
+        panels.set_position(488)
+        body.pack_start(panels, True, True, 0)
+        footer = styled(box(True, 4), "file-footer")
+        self.status = label("", wrap=True)
+        self.status.set_selectable(True)
+        self.progress_bar = Gtk.ProgressBar()
+        self.progress_bar.set_no_show_all(True)
+        footer.pack_start(self.progress_bar, False, False, 0)
+        footer.add(self.status)
+        body.pack_start(footer, False, False, 0)
+        self.connect("delete-event", lambda *_: self.busy)
+        self.connect("destroy", self.close_worker)
+        self.widgets_ready = True
+        self.controls()
+        self.show_all()
+        self.browse("local", "", on_done=lambda: self.browse("remote", ""))
+
+    def controls(self):
+        if not self.widgets_ready:
+            return
+        local, remote = self.panes["local"], self.panes["remote"]
+        self.upload.set_sensitive(not self.busy and remote.path is not None and bool(local.selected()))
+        self.download.set_sensitive(not self.busy and local.path is not None and bool(remote.selected()))
+        self.sign_in_button.set_sensitive(not self.busy)
+        for pane in self.panes.values():
+            pane.widget.set_sensitive(not self.busy)
+            pane.up.set_sensitive(not self.busy and pane.parent is not None)
+
+    def sign_in(self):
+        self.owner.safe(lambda: self.owner.control_socket(self.profile))
+        if not self.closing:
+            self.browse("remote", self.panes["remote"].path or "", reconnect=True)
+
+    def request(self, request, working, on_done=None, finished_message=None):
+        if self.busy or self.closing:
+            return False
+        self.busy = True
+        self.status.set_text(working)
+        self.controls()
+        if request["action"] == "copy":
+            self.progress_bar.set_fraction(0)
+            self.progress_bar.show()
+
+        def work():
+            if self.worker is None or self.worker.poll() is not None:
+                self.worker = subprocess.Popen(
+                    [SSHI, "__files", "--", self.profile["name"]],
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                    text=True, encoding="utf-8",
+                )
+            self.worker.stdin.write(json.dumps(request, ensure_ascii=False) + "\n")
+            self.worker.stdin.flush()
+            for line in self.worker.stdout:
+                event = json.loads(line)
+                if event["type"] == "progress":
+                    GLib.idle_add(self.progress, event["progress"])
+                else:
+                    return event
+            raise ValueError(tr("Сеанс передачи завершился. Попробуйте обновить панель.", "The file session closed. Try refreshing the pane."))
+
+        def result(event, error):
+            if self.closing:
+                return
+            self.busy = False
+            self.progress_bar.hide()
+            if not error and event["type"] == "error":
+                error = event["message"]
+            if error:
+                self.status.set_text(error)
+            elif event["type"] == "listing":
+                self.panes[event["listing"]["side"]].replace(event["listing"])
+                self.status.set_text(finished_message or tr("Готово", "Ready"))
+            elif event["type"] == "copied":
+                self.status.set_text(tr("Скопировано файлов: {}", "Files copied: {}").format(event["files"]))
+            self.controls()
+            if on_done and (not error or request["side"] == "local" and request["action"] == "list"):
+                on_done()
+
+        background(work, result)
+        return True
+
+    def browse(self, side, path, reconnect=False, on_done=None, finished_message=None):
+        if path is None:
+            return
+        title = tr("Подключаемся к удалённой машине…", "Connecting to the remote computer…") if (
+            side == "remote" and (self.panes[side].path is None or reconnect)
+        ) else tr("Открываем папку…", "Opening folder…")
+        self.request({"action": "list", "side": side, "path": path, "reconnect": reconnect},
+                     title, on_done=on_done, finished_message=finished_message)
+
+    def copy(self, side, names=None):
+        other = "remote" if side == "local" else "local"
+        source, dest = self.panes[side], self.panes[other]
+        names = names if names is not None else source.selected()
+        if not source.path or not dest.path or not names or not all(
+            name in source.entries and source.entries[name]["kind"] in ("file", "directory") for name in names
+        ):
+            return False
+        return self.request({"action": "copy", "side": side, "source": source.path,
+                             "destination": dest.path, "names": names},
+                            tr("Передаём файлы…", "Transferring files…"),
+                            on_done=lambda: self.browse(other, dest.path, finished_message=self.status.get_text()))
+
+    def progress(self, progress):
+        if self.closing or not self.busy:
+            return
+        bytes_done, total = progress["bytes"], progress["total"]
+        if total:
+            self.progress_bar.set_fraction(min(bytes_done / total, 1))
+        else:
+            self.progress_bar.pulse()
+        self.status.set_text(f'{FilePane.visible(progress["name"])} · {GLib.format_size(bytes_done)}')
+
+    def drop(self, _tree, context, _x, _y, data, _info, time, target):
+        source = "local" if target == "remote" else "remote"
+        success = False
+        if Gtk.drag_get_source_widget(context) == self.panes[source].tree:
+            try:
+                names = json.loads(data.get_data())
+                success = isinstance(names, list) and all(isinstance(name, str) for name in names) and self.copy(source, names)
+            except (TypeError, ValueError):
+                pass
+        Gtk.drag_finish(context, success, False, time)
+
+    def close_worker(self, *_args):
+        self.closing = True
+        if self.worker is not None:
+            self.worker.stdin.close()
 
 class ForwardDialog(Gtk.Dialog):
     def __init__(self, parent, profile):
@@ -939,7 +1188,7 @@ class ConnectionDialog(Gtk.Dialog):
 class Window(Gtk.Window):
     def __init__(self):
         super().__init__(title="SSHI")
-        self.set_default_size(910, 550)
+        self.set_default_size(950, 585)
         self.set_icon_name("sshi")
         header = Gtk.HeaderBar(title="SSHI", show_close_button=True)
         self.set_titlebar(header)
@@ -1017,7 +1266,7 @@ class Window(Gtk.Window):
 
     def refresh_language(self):
         self.refresh_update_ui()
-        self.add_button.set_label(tr("Подключение", "Connection"))
+        self.add_button.set_label(tr("Новое подключение", "New connection"))
         self.sidebar_title.set_text(tr("Подключения", "Connections"))
         self.search.set_placeholder_text(tr("Поиск подключений", "Search connections"))
         self.menu_button.set_tooltip_text(tr("Настройки, идентификатор и резервные копии",
@@ -1163,7 +1412,14 @@ class Window(Gtk.Window):
                 button.set_halign(Gtk.Align.START)
                 add(styled(button, "suggested-action", "sshi-primary"))
         else:
-            add(label(p["name"], "sshi-title"))
+            hero = styled(box(False, 13), "sshi-title-card")
+            badge = styled(Gtk.Image.new_from_icon_name("network-server-symbolic", Gtk.IconSize.DND), "sshi-profile-icon")
+            badge.set_valign(Gtk.Align.CENTER)
+            hero.add(badge)
+            name = label(p["name"], "sshi-title", wrap=True)
+            name.set_selectable(True)
+            hero.pack_start(name, True, True, 0)
+            add(hero)
             card = styled(Gtk.Grid(column_spacing=18, row_spacing=10), "sshi-card")
             for index, (title, value) in enumerate([(tr("SSH-логин", "SSH user"), p["user"]), ("Endpoint ID", p["endpoint"]),
                                                     ("Relay", p["relay"] or tr("Из настроек SSHI", "From SSHI settings"))]):
@@ -1172,14 +1428,16 @@ class Window(Gtk.Window):
                 field.set_hexpand(True)
                 field.set_selectable(True)
                 card.attach(field, 1, index, 1, 1)
-            add(card)
             controls = box()
             controls.add(styled(action(tr("Открыть терминал", "Open terminal"), lambda: self.connect_to(p),
                                        "utilities-terminal-symbolic"), "suggested-action", "sshi-primary"))
+            controls.add(styled(action(tr("Файлы", "Files"), lambda: self.safe(lambda: FileWindow(self, p)),
+                                       "folder-open-symbolic"), "sshi-secondary"))
             controls.add(action(tr("Изменить", "Edit"), lambda: self.edit(p)))
             add(controls)
-            add(Gtk.Separator())
-            tools = Gtk.Grid(column_spacing=9, row_spacing=9)
+            add(card)
+            add(label(tr("Инструменты подключения", "Connection tools"), "sshi-section"))
+            tools = Gtk.Grid(column_spacing=9, row_spacing=9, column_homogeneous=True)
             items = [
                 (tr("Ввести приглашение…", "Redeem invite…"), "mail-read-symbolic",
                  lambda: ConnectionDialog(self, p).present_form()),
@@ -1380,7 +1638,7 @@ class Window(Gtk.Window):
         relay = action(tr("Настройки relay…", "Relay settings…"), lambda: self.safe(lambda: self.relay_settings(dialog)),
                        "network-server-symbolic")
         grid.attach(relay, 0, 1, 2, 1)
-        release = Gtk.LinkButton.new_with_label(RELEASE_URL, tr("Что нового в 0.2.5", "What’s new in 0.2.5"))
+        release = Gtk.LinkButton.new_with_label(RELEASE_URL, tr("Что нового в 0.3.0", "What’s new in 0.3.0"))
         release.set_halign(Gtk.Align.START)
         grid.attach(release, 0, 2, 2, 1)
         check = action(tr("Проверить обновления", "Check for updates"), self.check_updates)

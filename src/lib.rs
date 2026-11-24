@@ -1,3 +1,4 @@
+pub mod file_transfer;
 pub mod forwarding;
 mod identity;
 pub mod invite;

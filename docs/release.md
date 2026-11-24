@@ -1,15 +1,20 @@
-# SSHI 0.2.5
+# SSHI 0.3.0
 
-## SSH-сокеты на macOS
+## Передача файлов
 
-В приложении для Mac выберите сохранённое подключение и откройте **SSH-сокет…**. Окно автоматически проверяет состояние мастера OpenSSH. Нажмите **Запустить**, пройдите вход в Терминале и дождитесь сообщения о готовности. После этого скопируйте команду для другого окна или Codex. Если запуск завершится ошибкой, её сообщение появится в диалоге.
+- Выберите сохранённое подключение и нажмите **«Файлы»**. Слева показан ваш компьютер, справа — выбранный получатель. Перетащите файлы или папки в другую панель. Кнопки загрузки и скачивания позволяют выполнить то же действие с клавиатуры.
+- Поля пути, переход на уровень выше и обновление доступны с обеих сторон. Во время копирования виден прогресс. SSHI сохраняет существующий файл при совпадении имён.
+- CLI поддерживает `sshi --cp` и `sshi cp`, выбор ключа через `-i` и копирование папок через `-r`. Передача использует SFTP через обычный Iroh-маршрут.
 
-В Linux окно SSH-сокета отслеживает состояние подключения с версии 0.2.4. В комплект 0.2.5 входит также пересборка портативного клиента Windows x64 из выпуска 0.2.4.
+## Интерфейс
+
+- В Linux, macOS и Windows основные действия **«Терминал»** и **«Файлы»** теперь рядом. Настройки подключения и вспомогательные SSH-инструменты доступны в выбранном профиле.
+- На Linux и macOS при входе по паролю файловое окно предлагает воспользоваться терминалом. На Windows ввод и проверка отпечатка доступны в самом файловом окне.
 
 ## English
 
-On macOS, select a saved connection and open **SSH control socket…**. The dialog checks the OpenSSH master's status automatically. Select **Start socket**, sign in through Terminal, then copy the command once the dialog shows that the socket is ready. If startup fails, the dialog displays the error.
+- Select a connection and open **Files** for a two-pane browser. Drag files or folders between your computer and the remote machine, or use Upload and Download.
+- Use `sshi --cp` or `sshi cp` from the terminal. The `-r` flag copies folders. Transfers use SFTP over Iroh and preserve files at conflicting destinations.
+- The Linux, macOS and Windows connection managers place the terminal and file browser actions together.
 
-Linux has included automatic socket status since 0.2.4. The Windows x64 download is a rebuild of the 0.2.4 portable client.
-
-[Руководство и установка / Setup guide](https://github.com/gadmin2151/sshi/blob/v0.2.5/README.md) · [Изменения в 0.2.4 / Previous release](https://github.com/gadmin2151/sshi/releases/tag/v0.2.4) · [Все выпуски / All releases](https://github.com/gadmin2151/sshi/releases)
+[Руководство / Setup guide](https://github.com/gadmin2151/sshi/blob/v0.3.0/README.md)

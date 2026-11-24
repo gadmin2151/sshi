@@ -52,6 +52,8 @@ pub fn caption(source: &'static str) -> &'static str {
         "Проброс портов…" => "Port forwarding…",
         "Сохранить" => "Save",
         "Подключиться" => "Connect",
+        "Терминал" => "Terminal",
+        "Файлы" => "Files",
         _ => source,
     }
 }

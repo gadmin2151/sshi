@@ -91,7 +91,7 @@ def smoke(base):
         f"ListenAddress 127.0.0.1\nPort {ssh_port}\nHostKey {base}/host\n"
         f"AuthorizedKeysFile {base}/client.pub\nPidFile {base}/sshd.pid\nAllowUsers {user}\n"
         "PasswordAuthentication no\nKbdInteractiveAuthentication no\nAuthenticationMethods publickey\n"
-        "UsePAM no\nPermitUserRC no\nStrictModes no\nDisableForwarding yes\nPrintLastLog no\n"
+        "UsePAM no\nPermitUserRC no\nStrictModes no\nDisableForwarding yes\nPrintLastLog no\nSubsystem sftp internal-sftp\n"
     )
     for name in ("host", "client", "interactive"):
         command(["/usr/bin/ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", base / name], env)
@@ -198,6 +198,19 @@ def smoke(base):
         assert command(native + ["true"], tx, check=False).returncode != 0
         wait("socket broker shutdown", lambda: not (base / "tx/sshi/proxy.sock").exists(), timeout=15)
         print("Managed socket survived terminal closure, reused one SSH login through Iroh, and closed cleanly", flush=True)
+
+        payload = "SFTP test".encode() * 8192
+        source = base / "mac send.bin"
+        source.write_bytes(payload)
+        remote = base / "mac receiver.bin"
+        destination_path = f"{profile}:{remote}"
+        command([sshi, "--cp", source, destination_path], tx)
+        assert remote.read_bytes() == payload
+        download = base / "mac receive.bin"
+        command([sshi, "cp", destination_path, download], tx)
+        assert download.read_bytes() == payload
+        assert command([sshi, "--cp", source, destination_path], tx, check=False).returncode != 0
+        print("macOS CLI copied an SFTP file in both directions through Iroh", flush=True)
 
 
 if __name__ == "__main__":

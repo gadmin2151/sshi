@@ -117,6 +117,7 @@ struct SheetItem: Identifiable {
         case editor(Panel)
         case invitation(InvitationStart)
         case socket(Profile)
+        case files(Profile)
     }
     let content: Content
 }
@@ -271,18 +272,32 @@ struct ProfileDetail: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 19) {
-                Image(systemName: "terminal.fill").font(.system(size: 26)).foregroundColor(.accentColor)
-                Text(profile.name).font(.largeTitle.bold()).textSelection(.enabled)
-                field(language("Пользователь SSH", "SSH user"), profile.user)
-                field("Endpoint ID", profile.endpoint)
-                field("Relay", profile.relay.isEmpty ? language("Из настроек SSHI", "From SSHI settings") : profile.relay)
+                HStack(spacing: 14) {
+                    Image(systemName: "server.rack").font(.system(size: 23, weight: .semibold))
+                        .foregroundColor(.white).frame(width: 47, height: 47)
+                        .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 12))
+                    Text(profile.name).font(.largeTitle.bold()).textSelection(.enabled)
+                    Spacer(minLength: 0)
+                }.padding(16).frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.accentColor.opacity(0.10), in: RoundedRectangle(cornerRadius: 15))
                 HStack(spacing: 12) {
                     Button {
                         workspace.launch(["connect", profile.name], hold: false)
                     } label: { Label(language("Открыть терминал", "Open terminal"), systemImage: "terminal") }
                         .buttonStyle(.borderedProminent).controlSize(.large)
+                    Button {
+                        workspace.sheet = SheetItem(content: .files(profile))
+                    } label: { Label(language("Файлы", "Files"), systemImage: "folder") }
+                    .buttonStyle(.bordered)
                     Button(language("Изменить", "Edit")) { workspace.show(.edit(profile)) }
                 }
+                VStack(alignment: .leading, spacing: 11) {
+                    field(language("Пользователь SSH", "SSH user"), profile.user)
+                    field("Endpoint ID", profile.endpoint)
+                    field("Relay", profile.relay.isEmpty ? language("Из настроек SSHI", "From SSHI settings") : profile.relay)
+                }.padding(15).frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color(nsColor: .quaternaryLabelColor).opacity(0.36), in: RoundedRectangle(cornerRadius: 10))
+                Text(language("Инструменты подключения", "Connection tools")).font(.headline)
                 Divider()
                 HStack(spacing: 16) {
                     Menu(language("Доступ", "Access")) {
@@ -609,6 +624,7 @@ struct WorkspaceView: View {
             case .editor(let panel): Editor(workspace: workspace, panel: panel)
             case .invitation(let start): InvitationSheet(workspace: workspace, start: start)
             case .socket(let profile): SocketSheet(workspace: workspace, profile: profile, language: language)
+            case .files(let profile): FileBrowser(workspace: workspace, profile: profile, language: language)
             }
         }
         .alert("SSHI", isPresented: Binding(get: { workspace.feedback != nil }, set: { if !$0 { workspace.feedback = nil } })) {

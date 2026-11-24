@@ -5,6 +5,7 @@ import SwiftUI
 
 @MainActor
 struct SocketSheet: View {
+    @Environment(\.dismiss) private var dismiss
     @ObservedObject var workspace: Workspace
     let profile: Profile
     let language: AppLanguage
@@ -55,7 +56,7 @@ struct SocketSheet: View {
             HStack {
                 Text(copied).foregroundColor(.secondary)
                 Spacer()
-                Button(language("Готово", "Done")) { workspace.sheet = nil }.keyboardShortcut(.cancelAction)
+                Button(language("Готово", "Done")) { dismiss() }.keyboardShortcut(.cancelAction)
             }
         }
         .padding(24).frame(width: 510)

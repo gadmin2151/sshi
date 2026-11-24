@@ -83,6 +83,42 @@ def ready(process, logfile, marker):
         raise AssertionError(f"Process exited early: {text(logfile.read_bytes())}")
     return marker in logfile.read_bytes()
 
+def check_file_transfers(profile, env, base):
+    source = base / "Тест [3].bin"
+    payload = bytes(range(256)) * 2049
+    source.write_bytes(payload)
+    remote_dir = base / "remote files"
+    remote_dir.mkdir()
+    check(run(["sshi", "--cp", str(source), f"{profile}:{remote_dir}/"], env=env), "upload binary")
+    assert (remote_dir / source.name).read_bytes() == payload
+    check(run(["sshi", "cp", f"{profile}:{remote_dir}/{source.name}", str(base / "download.bin")], env=env), "download binary")
+    assert (base / "download.bin").read_bytes() == payload
+    source.write_bytes(b"collision")
+    assert run(["sshi", "--cp", str(source), f"{profile}:{remote_dir}"], env=env).returncode != 0
+    assert (remote_dir / source.name).read_bytes() == payload
+
+    source_dir = base / "local-tree"
+    source_dir.mkdir()
+    (source_dir / "inner").mkdir()
+    (source_dir / "inner" / "empty").write_bytes(b"")
+    check(run(["sshi", "--cp", "-r", str(source_dir), f"{profile}:{remote_dir}/"], env=env), "upload folder")
+    check(run(["sshi", "--cp", "-r", f"{profile}:{remote_dir}/{source_dir.name}", str(base / "another-tree")], env=env), "download folder")
+    assert (base / "another-tree" / "inner" / "empty").read_bytes() == b""
+
+    requests = [
+        {"action":"list", "side":"remote", "path":str(remote_dir)},
+        {"action":"copy", "side":"remote", "source":str(remote_dir), "destination":str(base / "another-tree"), "names":[source.name]},
+        {"action":"copy", "side":"remote", "source":str(remote_dir), "destination":str(base), "names":["../login"]},
+    ]
+    worker = subprocess.run(["sshi", "__files", "--", profile], env=env, capture_output=True, timeout=32,
+                            input=("\n".join(json.dumps(request) for request in requests) + "\n").encode())
+    events = [json.loads(line) for line in check(worker, "desktop file session").splitlines()]
+    assert any(e["type"] == "listing" and source.name in {item["name"] for item in e["listing"]["entries"]} for e in events)
+    assert any(e["type"] == "copied" and e["files"] == 1 for e in events)
+    assert events[-1]["type"] == "error" and "invalid file name" in events[-1]["message"]
+    assert (base / "another-tree" / source.name).read_bytes() == payload
+    print("SFTP upload and download, recursive copy, desktop session and no-clobber: pass", flush=True)
+
 def check_profile_socket(profile, destination, env, sshd_log):
     def action(name):
         return run(["sshi", "socket", name, profile], env=env)
@@ -160,7 +196,7 @@ with tempfile.TemporaryDirectory(prefix="sshi.") as tmp:
         f"HostKey {base / 'host'}\nAuthorizedKeysFile {base / 'login.pub'}\nPidFile {base / 'sshd.pid'}\n"
         "PermitRootLogin prohibit-password\nPasswordAuthentication no\n"
         "KbdInteractiveAuthentication no\nUsePAM no\nStrictModes no\n"
-        "AllowTcpForwarding yes\nLogLevel VERBOSE\n"
+        "AllowTcpForwarding yes\nLogLevel VERBOSE\nSubsystem sftp internal-sftp\n"
     )
     pathlib.Path("/etc/sshi/config.toml").write_text(
         f'relay_url = "{relay}"\n'
@@ -295,6 +331,7 @@ with tempfile.TemporaryDirectory(prefix="sshi.") as tmp:
                     check(run(["sshi", "profile", "save", "--name", profile_name, "--user", "root",
                                "--endpoint", receiver_id], env=initiator), "create desktop profile")
                     check_profile_socket(profile_name, destination, initiator, sshd_log)
+                    check_file_transfers(profile_name, initiator, base)
                     for kind in ("local", "remote", "dynamic"):
                         with socket.socket() as sock:
                             sock.bind(("127.0.0.1", 0))

@@ -2,6 +2,7 @@ mod config;
 mod control_socket;
 mod copy_iid;
 mod copy_ssh_key;
+mod files;
 mod invitation_cli;
 mod invitations;
 mod login_invite;
@@ -97,6 +98,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Action {
+    /// Copy files over SSH and Iroh using SFTP.
+    #[command(long_flag = "cp")]
+    Cp(iroh_ssh::file_transfer::CopyArgs),
+    #[command(name = "__files", hide = true)]
+    FileBrowser { profile: String },
     /// Manage a local OpenSSH control socket for a saved Iroh connection.
     Socket {
         #[command(subcommand)]
@@ -249,6 +255,8 @@ fn main() -> Result<()> {
     }
     let cli = Cli::parse();
     match cli.action {
+        Some(Action::Cp(args)) => run_async(files::copy(args)),
+        Some(Action::FileBrowser { profile }) => run_async(files::browser(&profile)),
         Some(Action::Socket { command }) => control_socket::run(command),
         Some(Action::Update { json }) => run_async(iroh_ssh::update::print_check(json)),
         Some(Action::Id) => {

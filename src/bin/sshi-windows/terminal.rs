@@ -4,7 +4,7 @@ use std::{
     io::{self, Write},
     path::PathBuf,
     process::Command,
-    sync::Arc,
+    sync::{Arc, mpsc},
     time::Duration,
 };
 
@@ -20,7 +20,7 @@ use russh::{
     client::{self, AuthResult, KeyboardInteractiveAuthResponse},
     keys::{self, HashAlg, PrivateKey, PrivateKeyWithHashAlg, PublicKeyOrCertificate},
 };
-use tokio::{io::AsyncReadExt, time};
+use tokio::{io::AsyncReadExt, sync::oneshot, time};
 use windows_sys::Win32::{
     Foundation::HANDLE,
     Storage::FileSystem::{FILE_TYPE_DISK, FILE_TYPE_PIPE, GetFileType},
@@ -124,7 +124,7 @@ pub async fn connect(
         let handler = VerifyHost {
             store: store.clone(),
             endpoint: profile.endpoint,
-            interactive,
+            input: LoginInput::Console(interactive),
         };
         let mut ssh = client::connect_stream(Arc::new(config), stream, handler)
             .await
@@ -578,10 +578,109 @@ async fn exec_remote(
     Ok(())
 }
 
+#[derive(Clone)]
+pub enum LoginInput {
+    Console(bool),
+    Desktop(mpsc::Sender<LoginQuestion>),
+}
+
+#[derive(Clone, Copy)]
+pub enum QuestionKind {
+    TrustHost,
+    Secret,
+    Text,
+}
+
+pub struct LoginQuestion {
+    pub message: String,
+    pub kind: QuestionKind,
+    pub answer: oneshot::Sender<Option<String>>,
+}
+
+impl LoginInput {
+    async fn answer(&self, mut message: String, kind: QuestionKind) -> Result<String> {
+        match self {
+            Self::Console(interactive) => {
+                if matches!(kind, QuestionKind::TrustHost) {
+                    message.push_str(tr(" Введите yes или no: ", " Enter yes or no: "));
+                }
+                prompt(message, !matches!(kind, QuestionKind::Secret), *interactive).await
+            }
+            Self::Desktop(sender) => {
+                let (answer, receiver) = oneshot::channel();
+                sender
+                    .send(LoginQuestion {
+                        message,
+                        kind,
+                        answer,
+                    })
+                    .ok()
+                    .context("the file window was closed")?;
+                receiver
+                    .await?
+                    .context(tr("Вход отменён", "Sign-in cancelled"))
+            }
+        }
+    }
+}
+
+pub struct FileConnection {
+    pub sftp: russh_sftp::client::SftpSession,
+    _ssh: client::Handle<VerifyHost>,
+}
+
+pub async fn open_files(
+    store: &Store,
+    profile: &Profile,
+    input: LoginInput,
+) -> Result<FileConnection> {
+    let route = relay_route(profile)?;
+    let stream = broker::connect(store, &route, profile.endpoint).await?;
+    let config = client::Config {
+        keepalive_interval: Some(Duration::from_secs(30)),
+        ..Default::default()
+    };
+    let handler = VerifyHost {
+        store: store.clone(),
+        endpoint: profile.endpoint,
+        input: input.clone(),
+    };
+    let mut ssh = client::connect_stream(Arc::new(config), stream, handler)
+        .await
+        .context(tr(
+            "Установить SSH-соединение",
+            "Establish the SSH connection",
+        ))?;
+    authenticate_with(&mut ssh, store, profile, &input, None).await?;
+    let mut channel = ssh.channel_open_session().await?;
+    channel.request_subsystem(true, "sftp").await?;
+    time::timeout(Duration::from_secs(25), async {
+        while let Some(reply) = channel.wait().await {
+            match reply {
+                ChannelMsg::Success => return Ok(()),
+                ChannelMsg::Failure | ChannelMsg::Eof | ChannelMsg::Close => break,
+                _ => {}
+            }
+        }
+        bail!(
+            "{}",
+            tr(
+                "SSH-сервер отклонил SFTP. Проверьте подсистему sftp в sshd.",
+                "The SSH server refused SFTP. Check the sftp subsystem in sshd."
+            )
+        )
+    })
+    .await
+    .context("SFTP subsystem did not respond")??;
+    let sftp = iroh_ssh::file_transfer::open_session(channel.into_stream(), 35).await?;
+    let _ = store.record_connection(profile);
+    Ok(FileConnection { sftp, _ssh: ssh })
+}
+
 struct VerifyHost {
     store: Store,
     endpoint: EndpointId,
-    interactive: bool,
+    input: LoginInput,
 }
 
 impl client::Handler for VerifyHost {
@@ -600,10 +699,9 @@ impl client::Handler for VerifyHost {
             );
             return Ok(true);
         }
-        let accepted = prompt(
-            tr_format!("Первое подключение. Сверьте отпечаток SSH-сервера: {fingerprint}\nДоверять этому ключу? Введите yes или no: ", "First connection. Verify the SSH host key fingerprint: {fingerprint}\nTrust this key? Enter yes or no: "),
-            true,
-            self.interactive,
+        let accepted = self.input.answer(
+            tr_format!("Первое подключение. Сверьте отпечаток SSH-сервера: {fingerprint}\nДоверять этому ключу?", "First connection. Verify the SSH host key fingerprint: {fingerprint}\nTrust this key?"),
+            QuestionKind::TrustHost,
         ).await?;
         if accepted != "yes" {
             return Ok(false);
@@ -621,6 +719,23 @@ async fn authenticate(
     interactive: bool,
     identity: Option<PrivateKey>,
 ) -> Result<()> {
+    authenticate_with(
+        ssh,
+        store,
+        profile,
+        &LoginInput::Console(interactive),
+        identity,
+    )
+    .await
+}
+
+async fn authenticate_with(
+    ssh: &mut client::Handle<VerifyHost>,
+    store: &Store,
+    profile: &Profile,
+    input: &LoginInput,
+    identity: Option<PrivateKey>,
+) -> Result<()> {
     let user = &profile.user;
     let mut result = ssh.authenticate_none(user).await?;
     if result.success() {
@@ -630,7 +745,7 @@ async fn authenticate(
         let private = match identity {
             Some(key) => Some(key),
             None if !profile.ssh_key.is_empty() => {
-                Some(load_key(&profile.ssh_key, interactive).await?)
+                Some(load_key_with(&profile.ssh_key, input).await?)
             }
             None => store.ssh_identity()?,
         };
@@ -646,12 +761,12 @@ async fn authenticate(
         }
     }
     if supports_method(&result, MethodKind::Password) {
-        let password = prompt(
-            tr_format!("Пароль {user}: ", "Password for {user}: "),
-            false,
-            interactive,
-        )
-        .await?;
+        let password = input
+            .answer(
+                tr_format!("Пароль для {user}", "Password for {user}"),
+                QuestionKind::Secret,
+            )
+            .await?;
         result = ssh.authenticate_password(user, password).await?;
         if result.success() {
             return Ok(());
@@ -676,7 +791,15 @@ async fn authenticate(
                     let mut answers = Vec::with_capacity(prompts.len());
                     for question in prompts {
                         answers.push(
-                            prompt(clean_prompt(&question.prompt), question.echo, interactive)
+                            input
+                                .answer(
+                                    clean_prompt(&question.prompt),
+                                    if question.echo {
+                                        QuestionKind::Text
+                                    } else {
+                                        QuestionKind::Secret
+                                    },
+                                )
                                 .await?,
                         );
                     }
@@ -697,14 +820,18 @@ async fn authenticate(
 }
 
 async fn load_key(path: &str, interactive: bool) -> Result<PrivateKey> {
+    load_key_with(path, &LoginInput::Console(interactive)).await
+}
+
+async fn load_key_with(path: &str, input: &LoginInput) -> Result<PrivateKey> {
     match keys::load_secret_key(path, None) {
         Err(keys::Error::KeyIsEncrypted) => {
-            let passphrase = prompt(
-                tr("Фраза-пароль SSH-ключа: ", "SSH key passphrase: ").into(),
-                false,
-                interactive,
-            )
-            .await?;
+            let passphrase = input
+                .answer(
+                    tr("Фраза-пароль SSH-ключа", "SSH key passphrase").into(),
+                    QuestionKind::Secret,
+                )
+                .await?;
             keys::load_secret_key(path, Some(&passphrase))
         }
         result => result,

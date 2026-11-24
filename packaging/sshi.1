@@ -1,4 +1,4 @@
-.TH SSHI 1 "2026-11-23" "SSHI 0.2.5" "User Commands"
+.TH SSHI 1 "2026-11-23" "SSHI 0.3.0" "User Commands"
 .SH NAME
 sshi, sshi-copy-id, sshi-copy-iid \- use OpenSSH over an iroh relay
 .SH SYNOPSIS
@@ -108,6 +108,18 @@ and
 A dynamic forward is a local SOCKS proxy. Applications choose their own destinations.
 Ports range from 1 through 65535. IPv6 addresses may be entered with or without brackets.
 Press Ctrl+C in the forwarding terminal to stop.
+.TP
+.B sshi --cp [-r] [-i IDENTITY] SOURCE DESTINATION
+Copy a file over SFTP through the configured Iroh relay. One argument is a local
+path. The other is a saved connection name or USER@ENDPOINT_ID followed by a
+colon and a remote path. Quote arguments with spaces. An empty remote path
+means the SSH user's home directory. An existing destination directory receives
+the source with its original name. Existing files are kept intact. Use
+.B -r
+to copy a folder and its contents. The receiving OpenSSH server must have an
+SFTP subsystem. The subcommand
+.B cp
+has the same syntax.
 .TP
 .B socket start [\-\-persist TIME] PROFILE
 Authenticate through the selected Iroh relay, then create a local OpenSSH control

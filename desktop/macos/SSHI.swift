@@ -503,13 +503,19 @@ private final class ProfileCard: NSCollectionViewItem {
 
 @MainActor
 final class ProfileGrid: NSCollectionView, NSCollectionViewDataSource, NSCollectionViewDelegateFlowLayout, NSTextFieldDelegate {
+    private struct CardPress {
+        let name: String
+        let location: NSPoint
+        let count: Int
+    }
+
     private static let cardID = NSUserInterfaceItemIdentifier("profileCard")
     private let workspace: Workspace
     private let openProfile: (String) -> Void
     private var profiles: [Profile] = []
     private var syncing = false
     private var lastClicked: String?
-    private var previousMouseDown: String?
+    private var pressedCard: CardPress?
     private var renameTimer: Timer?
     private var editingName: String?
 
@@ -591,37 +597,61 @@ final class ProfileGrid: NSCollectionView, NSCollectionViewDataSource, NSCollect
         renameTimer?.invalidate()
         renameTimer = nil
         lastClicked = nil
+        pressedCard = nil
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
         guard let target = super.hitTest(point) else { return nil }
         // The collection handles selection across the card. The field handles inline edits.
-        return editingName == nil ? self : target
+        if target is NSTextView || (target as? NSTextField)?.isEditable == true {
+            return target
+        }
+        return self
     }
 
     override func mouseDown(with event: NSEvent) {
         renameTimer?.invalidate()
-        let path = indexPathForItem(at: convert(event.locationInWindow, from: nil))
-        let name = path.flatMap { profiles.indices.contains($0.item) ? profiles[$0.item].name : nil }
-        let repeated = name != nil && name == lastClicked
-        let sameCard = name == previousMouseDown
-        previousMouseDown = name
-        super.mouseDown(with: event)
-        guard let name = name, path?.item == selectedIndex, editingName == nil else {
+        renameTimer = nil
+        window?.makeFirstResponder(self)
+        guard let path = indexPathForItem(at: convert(event.locationInWindow, from: nil)),
+              profiles.indices.contains(path.item), editingName == nil else {
             resetClicks()
             return
         }
-        if event.clickCount == 2 {
+        let name = profiles[path.item].name
+        if selectedIndex != path.item {
+            resetClicks()
+            selectionIndexPaths = [path]
+            workspace.selected = name
+        }
+        // AppKit's default mouse-down tracker waits for a release before returning.
+        pressedCard = CardPress(name: name, location: event.locationInWindow, count: event.clickCount)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        let press = pressedCard
+        pressedCard = nil
+        let position = event.locationInWindow
+        guard let press = press,
+              abs(press.location.x - position.x) <= 6, abs(press.location.y - position.y) <= 6,
+              let path = indexPathForItem(at: convert(position, from: nil)),
+              path.item == selectedIndex, profiles.indices.contains(path.item),
+              profiles[path.item].name == press.name else {
+            resetClicks()
+            return
+        }
+        let repeated = lastClicked == press.name
+        if press.count == 2 {
             resetClicks()
             // The window server counts nearby clicks across card boundaries.
-            if sameCard && repeated { openProfile(name) }
-        } else if event.clickCount == 1 {
+            if repeated { openProfile(press.name) }
+        } else if press.count == 1 {
             if repeated {
                 renameTimer = Timer.scheduledTimer(timeInterval: NSEvent.doubleClickInterval,
                                                     target: self, selector: #selector(startRename(_:)),
                                                     userInfo: nil, repeats: false)
             }
-            lastClicked = name
+            lastClicked = press.name
         }
     }
 

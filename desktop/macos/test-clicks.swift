@@ -257,6 +257,7 @@ struct TestProfileClicks {
 
     @MainActor
     static func main() async throws {
+        setvbuf(stdout, nil, _IOLBF, 0)
         try await testSocketAndUpdates()
         try await testInvitations()
         try runWindowTests()

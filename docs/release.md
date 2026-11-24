@@ -1,15 +1,15 @@
-# SSHI 0.5.1
+# SSHI 0.5.2
 
-## Системная служба в Linux
+## Меню «Действия»
 
-- Пакеты Debian, RPM и Arch включают `sshid.service`. Служба использует Endpoint ID и настройки relay пользователя `root`.
-- Включите службу командой `sudo systemctl enable --now sshid`. Для перезапуска используйте `sudo systemctl restart sshid`, для просмотра журнала — `sudo journalctl -u sshid`.
-- Если `root` уже запустил получатель как пользовательскую службу `sshi`, остановите её перед запуском `sshid`.
+- Правый клик по карточке выбирает подключение и открывает его меню «Действия» в Linux, Windows и macOS.
+- В README добавлены однострочная установка Linux и пошаговая настройка relay.
+- Docker-образы для AMD64 и ARM64 доступны в артефактах GitHub Actions.
 
-## System service on Linux
+## Connection actions
 
-- Debian, RPM, and Arch packages include `sshid.service`. It uses root’s Endpoint ID and relay settings.
-- Enable and start the service with `sudo systemctl enable --now sshid`. Restart it with `sudo systemctl restart sshid` and view its logs with `sudo journalctl -u sshid`.
-- If root is already running the receiver as the `sshi` user service, stop that service before starting `sshid`.
+- Right-clicking a connection card selects it and opens its Actions menu on Linux, Windows, and macOS.
+- The README includes one-line Linux installation and relay setup instructions.
+- AMD64 and ARM64 Docker images are available as GitHub Actions artifacts.
 
-[Руководство / Setup guide](https://github.com/gadmin2151/sshi/blob/v0.5.1/README.md)
+[Руководство / Setup guide](https://github.com/gadmin2151/sshi/blob/v0.5.2/README.md)
